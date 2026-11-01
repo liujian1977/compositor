@@ -1,0 +1,41 @@
+{
+    "description": "Remove an object from a photo using inpainting",
+    "steps": [
+        {
+            "command": "compositor extract",
+            "args": {
+                "--input": "./scene.jpg",
+                "--model": "vision",
+                "--refine-radius": 5,
+                "--contrast-threshold": 0.8,
+                "--edge-shift": -2,
+                "--output": "./bg_mask.png"
+            },
+            "expected_status": "success",
+            "notes": "Extract background mask first"
+        },
+        {
+            "command": "compositor selection-modify",
+            "args": {
+                "--input": "./bg_mask.png",
+                "--operation": "contract",
+                "--amount": 15,
+                "--unit": "pixels",
+                "--output": "./object_approx_mask.png"
+            },
+            "expected_status": "success",
+            "notes": "Contract to isolate the object (rough approximation)"
+        },
+        {
+            "command": "compositor inpaint",
+            "args": {
+                "--image": "./scene.jpg",
+                "--mask": "./object_approx_mask.png",
+                "--algorithm": "lama",
+                "--lama-preset": "balanced",
+                "--output": "./cleaned_scene.png"
+            },
+            "expected_status": "success"
+        }
+    ]
+}

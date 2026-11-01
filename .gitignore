@@ -1,0 +1,16 @@
+# Swift Package Manager build artifacts
+.build/
+.swiftpm/
+Packages/
+xcuserdata/
+*.xcodeproj
+
+# Python virtualenv (not source)
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp

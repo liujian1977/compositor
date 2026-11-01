@@ -1,0 +1,17 @@
+{
+    "description": "Extract a subject from an image and save as transparent PNG",
+    "steps": [
+        {
+            "command": "compositor extract",
+            "args": {
+                "--input": "./photo.jpg",
+                "--model": "vision",
+                "--refine-radius": 3,
+                "--contrast-threshold": 0.75,
+                "--edge-shift": -1,
+                "--output": "./subject_mask.png"
+            },
+            "expected_status": "success"
+        }
+    ]
+}
