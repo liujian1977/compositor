@@ -9,8 +9,8 @@
 ## 1. 仓库布局
 
 ```
-compositor/                 (仓库根 = compositor Swift CLI 源码)
-├── Package.swift, src/ …   (compositor 工具源码，install 时就地编译)
+compositor/                 (仓库根)
+├── src/                    (compositor Swift CLI 源码：src/Package.swift …)
 └── art-design/             (本框架)
     ├── spec.md             ← 你正在读的安装规范
     ├── install.sh          ← 自动安装（实现本规范，幂等）
@@ -19,15 +19,19 @@ compositor/                 (仓库根 = compositor Swift CLI 源码)
     ├── example-local_config.json  ← local_config 占位模板（无真实值）
     ├── skills/             ← 14 个 CodeBuddy 技能目录
     └── assets/             ← knowledge.db / yolov8n.pt / comfyui_generate.py
+        └── compositor-bin/compositor  ← 预编译**通用二进制**(arm64+x86_64)，
+                                          普通安装直接用它，无需 Xcode
 ```
 
 ## 2. 前置条件（目标机）
 
 - macOS（框架的 GIMP script-fu 与 `~/.codebuddy` 路径均按 macOS 设计）
-- Xcode Command Line Tools（`swift` 命令）：`xcode-select --install`
 - Python 3.11+（用于建 venv；macOS 自带没有则另装）
 - GIMP 2.10（`.app` 包）：https://www.gimp.org/downloads/ —— **只能手动装**，脚本仅检查
 - 网络可达你的 ComfyUI 服务与多模态 LLM 服务（地址/密钥由 setup.sh 输入）
+- **Xcode Command Line Tools（可选）**：仓库已附带预编译的通用二进制 `compositor`，
+  默认安装**无需** `swift`/Xcode。仅当该预编译二进制缺失、需要从源码重新编译时才需要
+  `xcode-select --install`。
 
 ## 3. 安装（二选一）
 
@@ -50,13 +54,18 @@ cd compositor/art-design
 | 14 个技能 | `~/.codebuddy/skills/<name>` | 目录已存在？ | `art-design/skills/*` `cp -R` |
 | 资产 | `~/.codebuddy/assets/art-design/{knowledge.db,yolov8n.pt,comfyui_generate.py}` | 文件已存在？ | `art-design/assets/*` `cp` |
 | Python 环境 | `~/.venv-art` | 存在且 `import PIL,numpy,cv2,ultralytics,requests` 成功？ | `python3 -m venv` + `pip install -r requirements.txt` |
-| compositor CLI | `~/.codebuddy/bin/compositor`（软链到仓库 `.build/debug/compositor`） | 该路径可执行？ | 仓库根 `swift build` |
+| compositor CLI | `~/.codebuddy/bin/compositor`（复制自 `assets/compositor-bin/compositor`） | 该路径可执行？ | 预编译通用二进制 `cp`；缺则 `src/` 下 `swift build -c release` |
 | GIMP 2.10 | `/Applications/GIMP.app` | 存在？ | 手动下载安装（脚本不代装） |
 | 密钥/URL | `~/.codebuddy/assets/art-design/local_config.json` + `comfyui_1238.key` | 文件已存在？ | `setup.sh` 交互写入 |
 
-**compositor 编译**：仓库根即 Swift 包，`swift build` 产物在 `.build/debug/compositor`；
-install 将其软链到 `~/.codebuddy/bin/compositor`。脚本通过 `$COMPOSITOR_BIN` 环境变量或默认该路径调用。
-若 `swift` 不存在 → 先 `xcode-select --install`。
+**compositor 安装（默认无需编译）**：仓库 `art-design/assets/compositor-bin/compositor`
+是已编译的 **通用 Mach-O 二进制**（arm64 + x86_64，部署目标 macOS 14+）。
+`install.sh` 直接 `cp` 到 `~/.codebuddy/bin/compositor` 并 `xattr -c` 去除隔离属性，
+即可在**任意 Mac（Apple 芯片或 Intel）**直接运行，无需 Xcode。
+
+仅当预编译二进制缺失、需要从源码编译时，`install.sh` 才回退到：
+`cd src && swift build -c release`（此时才需要 Xcode Command Line Tools）。
+产物在 `src/.build/release/compositor`，脚本通过 `$COMPOSITOR_BIN` 环境变量或默认路径调用。
 
 **资产**中**不包含**任何密钥：真实密钥文件（`comfyui_1238.key`、`local_config.json`、
 `github_pat.txt`、`git_cred_helper.sh`、`.lock`、`.meta.json`）均不入库，仅 `example-local_config.json`
@@ -95,7 +104,10 @@ LLM 端点亦可来自 CodeBuddy 自带的 `~/.codebuddy/models.json`（支持 `
 
 ## 7. 排查
 
-- `swift: command not found` → `xcode-select --install`
+- `compositor: cannot be opened` / 被 Gatekeeper 拦截 → `xattr -c ~/.codebuddy/bin/compositor`
+  再运行（install.sh 已自动去隔离；仅手动拷贝时才需）。
+- 需要**从源码重编** compositor（删了预编译二进制时）→ 先 `xcode-select --install`，
+  再 `cd src && swift build -c release`。
 - 生图 403/401 → 重跑 `setup.sh` 确认 key/URL；ComfyUI 为单 GPU 串行，脚本内置 flock
 - 视觉 QA 找不到端点 → 确认 `local_config.json` 的 `llm_endpoints` 或 `~/.codebuddy/models.json`
 - GIMP 缺失 → 仅影响分层 PSD / script-fu 路线，其余（compositor/PIL 排版）仍可用

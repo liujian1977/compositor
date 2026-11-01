@@ -13,7 +13,7 @@
 #   - assets (knowledge.db, yolov8n.pt, comfyui_generate.py)
 #                              -> ~/.codebuddy/assets/art-design/
 #   - Python venv ~/.venv-art  (Pillow/numpy/opencv/ultralytics/requests)
-#   - compositor CLI           -> build from repo root, link ~/.codebuddy/bin/compositor
+#   - compositor CLI           -> pre-built universal binary (src build is fallback)
 #   - GIMP 2.10                -> checked only (must be installed manually on macOS)
 #   - local_config.json secrets -> via setup.sh (NOT committed)
 set -euo pipefail
@@ -76,18 +76,36 @@ fi
 # 4) compositor CLI ---------------------------------------------------------
 step "compositor CLI"
 if [ -x "${COMPOSITOR_BIN:-$COMPOSITOR_LINK}" ]; then
-  echo "  binary present at ${COMPOSITOR_BIN:-$COMPOSITOR_LINK} (skip build)"
+  echo "  binary present at ${COMPOSITOR_BIN:-$COMPOSITOR_LINK} (skip)"
 else
-  if [ -z "$(command -v swift || true)" ]; then
-    echo "  error: 'swift' not found. Install Xcode Command Line Tools (xcode-select --install)." >&2
-    echo "  Then re-run this script." >&2; exit 1
+  PREBUILT="$ART_DIR/assets/compositor-bin/compositor"
+  if [ -f "$PREBUILT" ]; then
+    # Pre-built universal (arm64 + x86_64) Mach-O — runs on any macOS 14+
+    # without Xcode. No compilation needed.
+    mkdir -p "$HOME/.codebuddy/bin"
+    cp "$PREBUILT" "$COMPOSITOR_LINK"
+    chmod +x "$COMPOSITOR_LINK"
+    # Strip quarantine so it launches on a clean Mac without code-signing.
+    command -v xattr >/dev/null 2>&1 && xattr -c "$COMPOSITOR_LINK" 2>/dev/null || true
+    echo "  installed pre-built universal binary -> $COMPOSITOR_LINK"
+  else
+    # Fallback: build from source. Requires Xcode Command Line Tools (swift).
+    if [ -z "$(command -v swift || true)" ]; then
+      echo "  error: pre-built binary missing and 'swift' not found." >&2
+      echo "  Install Xcode Command Line Tools (xcode-select --install) to build," >&2
+      echo "  or re-clone the repository to obtain the pre-built binary." >&2
+      exit 1
+    fi
+    if [ ! -f "$REPO_ROOT/src/Package.swift" ]; then
+      echo "  error: $REPO_ROOT/src/Package.swift not found; cannot build." >&2; exit 1
+    fi
+    echo "  building from $REPO_ROOT/src (swift build -c release)"
+    ( cd "$REPO_ROOT/src" && swift build -c release )
+    mkdir -p "$HOME/.codebuddy/bin"
+    BIN="$REPO_ROOT/src/.build/release/compositor"
+    ln -sf "$BIN" "$COMPOSITOR_LINK"
+    echo "  linked -> $COMPOSITOR_LINK"
   fi
-  echo "  building from $REPO_ROOT (swift build)"
-  ( cd "$REPO_ROOT" && swift build )
-  mkdir -p "$HOME/.codebuddy/bin"
-  BIN="$REPO_ROOT/.build/debug/compositor"
-  ln -sf "$BIN" "$COMPOSITOR_LINK"
-  echo "  linked -> $COMPOSITOR_LINK"
 fi
 
 # 5) GIMP (macOS) -----------------------------------------------------------
