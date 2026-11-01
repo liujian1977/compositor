@@ -1,0 +1,5 @@
+# Large binaries tracked via Git LFS (keep git history lean)
+art-design/assets/knowledge.db filter=lfs diff=lfs merge=lfs -text
+art-design/assets/yolov8n.pt filter=lfs diff=lfs merge=lfs -text
+# Pre-built compositor CLI binaries (shipped to avoid Xcode requirement)
+art-design/assets/compositor-bin/* filter=lfs diff=lfs merge=lfs -text
