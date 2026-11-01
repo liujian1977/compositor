@@ -1,0 +1,36 @@
+{
+  "project": "魅力上海·城市印象广告设计系列",
+  "theme": "传统与现代交融（石库门与陆家嘴）",
+  "style": "新中式插画风格",
+  "ads": [
+    {
+      "type": "报纸广告",
+      "file_png": "newspaper_ad_final.png",
+      "file_jpg": "newspaper_ad_final.jpg",
+      "specs": "约12cm×18cm，300dpi",
+      "usage": "报纸5栏宽幅，适合文字密集内容"
+    },
+    {
+      "type": "杂志广告", 
+      "file_png": "magazine_ad_final.png",
+      "file_jpg": "magazine_ad_final.jpg",
+      "specs": "A4跨页420×297mm，300dpi",
+      "usage": "杂志全彩大版面，视觉冲击力强"
+    },
+    {
+      "type": "招贴设计",
+      "file_png": "poster_ad_final.png", 
+      "file_jpg": "poster_ad_final.jpg",
+      "specs": "3×4米，150dpi",
+      "usage": "户外大型广告，远距离可读"
+    },
+    {
+      "type": "POP广告",
+      "file_png": "pop_ad_final.png",
+      "file_jpg": "pop_ad_final.jpg", 
+      "specs": "A5 148×210mm，300dpi",
+      "usage": "店内宣传，信息简洁，货架旁展示"
+    }
+  ],
+  "notes": "四种广告类型围绕同一主题，采用新中式插画风格，根据不同媒介特点调整规格和设计重点"
+}

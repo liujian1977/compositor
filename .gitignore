@@ -14,3 +14,11 @@ venv/
 
 # Editor
 *.swp
+
+# art-design framework: local secrets injected by setup.sh (never commit)
+art-design/assets/comfyui_1238.key
+art-design/assets/github_pat.txt
+art-design/assets/git_cred_helper.sh
+art-design/assets/local_config.json
+art-design/assets/*.lock
+art-design/assets/*.meta.json

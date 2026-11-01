@@ -1,0 +1,12 @@
+{
+  "comfyui_base": "http://<your-comfyui-host>:<port>",
+  "comfyui_key_path": "~/.codebuddy/assets/art-design/comfyui_1238.key",
+  "llm_endpoints": [
+    {
+      "url": "http://<your-llm-host>:<port>/v1/chat/completions",
+      "apiKey": "<your-llm-api-key>",
+      "id": "optional-model-id",
+      "supportsImages": true
+    }
+  ]
+}

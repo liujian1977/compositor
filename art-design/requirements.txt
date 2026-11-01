@@ -1,0 +1,7 @@
+# Python dependencies for the art-design framework scripts.
+# Installed into ~/.venv-art by install.sh.
+Pillow>=10.0
+numpy>=1.24
+opencv-python>=4.8
+ultralytics>=8.1
+requests>=2.31
