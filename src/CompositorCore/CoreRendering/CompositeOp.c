@@ -1,31 +1,41 @@
-// CompositeOp.c — Image compositing operations using pixel-level blending
-// Supports alpha blending, difference blend mode, and basic Poisson fusion.
+// CompositeOp.c — Image compositing operations using pixel-level blending.
+// Alpha blending, difference blend mode, and masked Poisson (seamless) cloning.
 
 #include "CompositeOp.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+static uint8_t clamp_u8_from_double(double v) {
+    if (v <= 0.0) return 0;
+    if (v >= 255.0) return 255;
+    return (uint8_t)(v + 0.5);
+}
+
+static int checked_pixel_count(int width, int height, size_t *out_count) {
+    if (width <= 0 || height <= 0) return -1;
+    size_t w = (size_t)width;
+    size_t h = (size_t)height;
+    if (h != 0 && w > SIZE_MAX / h) return -1;
+    size_t n = w * h;
+    if (n > SIZE_MAX / 3) return -1;
+    *out_count = n;
+    return 0;
+}
 
 // ─── Alpha Blending ──────────────────────────────────────────────────
 
 /**
  * Blend foreground onto background using standard alpha compositing (over operator).
- * Result: C_out = C_fg * α_fg + C_bg * (1 - α_fg)
- *
- * @param background  RGB pixels of background image (w*h*3 bytes)
- * @param foreground  RGB pixels of foreground image (w*h*3 bytes)
- * @param alpha       Alpha mask [0,255] (w*h bytes)
- * @param width       Image width
- * @param height      Image height
- * @param result      Output buffer (must be w*h*3 bytes, pre-allocated by caller)
+ * Result: C_out = C_fg * α + C_bg * (1 - α)
  */
-void alpha_blend(const uint8_t *background, const uint8_t *foreground,
-                 const uint8_t *alpha, int width, int height, uint8_t *result) {
-    if (!background || !foreground || !alpha || !result) return;
-
-    for (int i = 0; i < width * height; i++) {
+static void alpha_blend(const uint8_t *background, const uint8_t *foreground,
+                        const uint8_t *alpha, size_t count, uint8_t *result) {
+    for (size_t i = 0; i < count; i++) {
         float a = alpha[i] / 255.0f;
-        a = fmax(0.0f, fmin(1.0f, a)); // clamp to [0,1]
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
 
         for (int c = 0; c < 3; c++) {
             float fg = foreground[i * 3 + c];
@@ -41,193 +51,181 @@ void alpha_blend(const uint8_t *background, const uint8_t *foreground,
  * Difference blend mode: |foreground - background|, masked by alpha.
  * Where alpha=0, keep original background; where alpha=255, use difference result.
  */
-void blend_difference(const uint8_t *background, const uint8_t *foreground,
-                      const uint8_t *alpha, int width, int height, uint8_t *result) {
-    if (!background || !foreground || !alpha || !result) return;
-
-    for (int i = 0; i < width * height; i++) {
+static void blend_difference(const uint8_t *background, const uint8_t *foreground,
+                             const uint8_t *alpha, size_t count, uint8_t *result) {
+    for (size_t i = 0; i < count; i++) {
         float a = alpha[i] / 255.0f;
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
 
         for (int c = 0; c < 3; c++) {
             float fg = foreground[i * 3 + c];
             float bg = background[i * 3 + c];
             float diff = fabsf(fg - bg);
-
             result[i * 3 + c] = (uint8_t)roundf(diff * a + bg * (1.0f - a));
         }
     }
 }
 
-// ─── Simple Poisson-like Blending ────────────────────────────────────
+// ─── Masked Poisson blending ─────────────────────────────────────────
 
 /**
- * Gradient-domain blending using simplified Poisson approach.
- * This creates seamless blends by matching gradients at the boundary.
- * For full Poisson fusion, you'd solve a sparse linear system — here we use
- * a simpler gradient-matching heuristic that works well for most cases.
+ * Seamless clone: solve Δf = Δg inside the mask, with f = background outside.
  *
- * @param background      Background image RGB (w*h*3)
- * @param foreground      Foreground image RGB (w*h*3)
- * @param alpha           Soft alpha mask [0,255] (w*h)
- * @param width           Image width
- * @param height          Image height
- * @param result          Output buffer (pre-allocated by caller)
+ * Unknowns are pixels with alpha >= 128 that are not on the one-pixel image
+ * border. The border is always Dirichlet = background, because those pixels
+ * do not have a full 4-neighborhood. The discrete system at an unknown p is
+ *
+ *   4*f_p - Σ_{q neighbor} f_q = 4*g_p - Σ_{q neighbor} g_q
+ *
+ * with f_q fixed to the background wherever q is not an unknown. Conjugate
+ * gradient solves that SPD system per channel. Failure to allocate, or
+ * failure to drive the RMS residual under 1e-6, returns -1 and does not
+ * write `result`.
  */
-void poisson_blend_simple(const uint8_t *background, const uint8_t *foreground,
-                          const uint8_t *alpha, int width, int height, uint8_t *result) {
-    if (!background || !foreground || !alpha || !result) return;
+static int poisson_blend(const uint8_t *background, const uint8_t *foreground,
+                         const uint8_t *alpha, int width, int height,
+                         size_t count, uint8_t *result) {
+    uint8_t *unknown = NULL;
+    double *x = NULL;
+    double *r = NULL;
+    double *pdir = NULL;
+    double *Ap = NULL;
+    uint8_t *tmp = NULL;
+    int rc = -1;
 
-    // Allocate working buffers (float32 for numerical stability)
-    float *bg_f = calloc(width * height * 3, sizeof(float));
-    float *fg_f = calloc(width * height * 3, sizeof(float));
-    float *out_f = calloc(width * height * 3, sizeof(float));
+    size_t w = (size_t)width;
+    size_t h = (size_t)height;
+    size_t n_unknown = 0;
 
-    if (!bg_f || !fg_f || !out_f) {
-        free(bg_f); free(fg_f); free(out_f);
-        return;
-    }
-
-    // Convert to float
-    for (int i = 0; i < width * height * 3; i++) {
-        bg_f[i] = background[i];
-        fg_f[i] = foreground[i];
-    }
-
-    // Step 1: Compute gradient field of foreground
-    float *fg_grad_x = calloc((width - 1) * height * 3, sizeof(float));
-    float *fg_grad_y = calloc(width * (height - 1) * 3, sizeof(float));
-
-    if (!fg_grad_x || !fg_grad_y) {
-        free(bg_f); free(fg_f); free(out_f);
-        free(fg_grad_x); free(fg_grad_y);
-        return;
-    }
-
-    // Horizontal gradients
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width - 1; x++) {
-            int idx = (y * width + x) * 3;
-            int idx_next = (y * width + (x + 1)) * 3;
-            for (int c = 0; c < 3; c++) {
-                fg_grad_x[idx + c] = fg_f[idx_next + c] - fg_f[idx + c];
-            }
-        }
-    }
-
-    // Vertical gradients
-    for (int y = 0; y < height - 1; y++) {
-        for (int x = 0; x < width; x++) {
-            int idx = (y * width + x) * 3;
-            int idx_below = ((y + 1) * width + x) * 3;
-            for (int c = 0; c < 3; c++) {
-                fg_grad_y[idx + c] = fg_f[idx_below + c] - fg_f[idx + c];
-            }
-        }
-    }
-
-    // Step 2: Solve using iterative relaxation (simplified)
-    // Copy background as initial guess
-    memcpy(out_f, bg_f, width * height * 3 * sizeof(float));
-
-    int iterations = 50;
-    for (int iter = 0; iter < iterations; iter++) {
-        for (int y = 1; y < height - 1; y++) {
-            for (int x = 1; x < width - 1; x++) {
-                int idx = (y * width + x) * 3;
-
-                // Average of neighbors from current output
-                float sum_r = 0, sum_g = 0, sum_b = 0;
-                int count = 0;
-
-                // Left neighbor gradient match
-                if (x > 0) {
-                    int left_idx = (y * width + (x - 1)) * 3;
-                    sum_r += fg_f[left_idx] + fg_grad_x[idx];
-                    sum_g += fg_f[left_idx + 1] + fg_grad_x[idx + 1];
-                    sum_b += fg_f[left_idx + 2] + fg_grad_x[idx + 2];
-                    count++;
-                }
-
-                // Right neighbor gradient match
-                if (x < width - 1) {
-                    int right_idx = (y * width + (x + 1)) * 3;
-                    sum_r += fg_f[right_idx] - fg_grad_x[idx];
-                    sum_g += fg_f[right_idx + 1] - fg_grad_x[idx + 1];
-                    sum_b += fg_f[right_idx + 2] - fg_grad_x[idx + 2];
-                    count++;
-                }
-
-                // Top neighbor gradient match
-                if (y > 0) {
-                    int top_idx = ((y - 1) * width + x) * 3;
-                    sum_r += fg_f[top_idx] + fg_grad_y[idx];
-                    sum_g += fg_f[top_idx + 1] + fg_grad_y[idx + 1];
-                    sum_b += fg_f[top_idx + 2] + fg_grad_y[idx + 2];
-                    count++;
-                }
-
-                // Bottom neighbor gradient match
-                if (y < height - 1) {
-                    int bottom_idx = ((y + 1) * width + x) * 3;
-                    sum_r += fg_f[bottom_idx] - fg_grad_y[idx];
-                    sum_g += fg_f[bottom_idx + 1] - fg_grad_y[idx + 1];
-                    sum_b += fg_f[bottom_idx + 2] - fg_grad_y[idx + 2];
-                    count++;
-                }
-
-                if (count > 0) {
-                    out_f[idx] = sum_r / count;
-                    out_f[idx + 1] = sum_g / count;
-                    out_f[idx + 2] = sum_b / count;
+    unknown = (uint8_t *)calloc(count, 1);
+    x = (double *)malloc(count * sizeof(double));
+    r = (double *)malloc(count * sizeof(double));
+    pdir = (double *)malloc(count * sizeof(double));
+    Ap = (double *)malloc(count * sizeof(double));
+    tmp = (uint8_t *)malloc(count * 3);
+    if (!unknown || !x || !r || !pdir || !Ap || !tmp) goto done;
+    if (w >= 2 && h >= 2) {
+        for (size_t y = 1; y + 1 < h; y++) {
+            for (size_t xpix = 1; xpix + 1 < w; xpix++) {
+                size_t i = y * w + xpix;
+                if (alpha[i] >= 128) {
+                    unknown[i] = 1;
+                    n_unknown++;
                 }
             }
         }
+    }
 
-        // Step 3: Enforce alpha mask constraint
-        for (int i = 0; i < width * height; i++) {
-            float a = alpha[i] / 255.0f;
-            for (int c = 0; c < 3; c++) {
-                out_f[i * 3 + c] = out_f[i * 3 + c] * a + bg_f[i * 3 + c] * (1.0f - a);
+    for (int c = 0; c < 3; c++) {
+        for (size_t i = 0; i < count; i++) {
+            x[i] = (double)background[i * 3 + c];
+        }
+        memset(r, 0, count * sizeof(double));
+
+        double rs = 0.0;
+        if (n_unknown > 0) {
+            for (size_t y = 1; y + 1 < h; y++) {
+                for (size_t xpix = 1; xpix + 1 < w; xpix++) {
+                    size_t i = y * w + xpix;
+                    if (!unknown[i]) continue;
+                    size_t left = i - 1;
+                    size_t right = i + 1;
+                    size_t up = i - w;
+                    size_t down = i + w;
+                    double lap_g =
+                        4.0 * (double)foreground[i * 3 + c]
+                        - (double)foreground[left * 3 + c]
+                        - (double)foreground[right * 3 + c]
+                        - (double)foreground[up * 3 + c]
+                        - (double)foreground[down * 3 + c];
+                    double lap_x = 4.0 * x[i] - x[left] - x[right] - x[up] - x[down];
+                    double ri = lap_g - lap_x;
+                    r[i] = ri;
+                    rs += ri * ri;
+                }
             }
+        }
+        memcpy(pdir, r, count * sizeof(double));
+
+        /* RMS residual below 1e-6 is far inside one gray level after rounding. */
+        double stop = 1e-12 * (double)(n_unknown > 0 ? n_unknown : 1);
+        size_t max_iter = (w + h) * 48u + 64u;
+        size_t iter = 0;
+        while (n_unknown > 0 && rs > stop && iter < max_iter) {
+            iter++;
+            double pAp = 0.0;
+            for (size_t i = 0; i < count; i++) {
+                if (!unknown[i]) {
+                    Ap[i] = 0.0;
+                    continue;
+                }
+                double acc = 4.0 * pdir[i] - pdir[i - 1] - pdir[i + 1]
+                             - pdir[i - w] - pdir[i + w];
+                Ap[i] = acc;
+                pAp += pdir[i] * acc;
+            }
+            if (!(pAp > 0.0) || !isfinite(pAp) || !isfinite(rs)) goto done;
+
+            double step = rs / pAp;
+            double rs_new = 0.0;
+            for (size_t i = 0; i < count; i++) {
+                x[i] += step * pdir[i];
+                r[i] -= step * Ap[i];
+                rs_new += r[i] * r[i];
+            }
+            if (!isfinite(rs_new)) goto done;
+            if (rs_new <= stop) {
+                rs = rs_new;
+                break;
+            }
+            double beta = rs_new / rs;
+            for (size_t i = 0; i < count; i++) {
+                pdir[i] = r[i] + beta * pdir[i];
+            }
+            rs = rs_new;
+        }
+        if (n_unknown > 0 && rs > stop) goto done;
+
+        for (size_t i = 0; i < count; i++) {
+            double a = (double)alpha[i] / 255.0;
+            if (a < 0.0) a = 0.0;
+            if (a > 1.0) a = 1.0;
+            double mixed = x[i] * a + (double)background[i * 3 + c] * (1.0 - a);
+            tmp[i * 3 + c] = clamp_u8_from_double(mixed);
         }
     }
 
-    // Convert back to uint8 and write result
-    for (int i = 0; i < width * height * 3; i++) {
-        float val = fmax(0.0f, fmin(255.0f, out_f[i]));
-        result[i] = (uint8_t)roundf(val);
-    }
+    memcpy(result, tmp, count * 3);
+    rc = 0;
 
-    free(bg_f); free(fg_f); free(out_f);
-    free(fg_grad_x); free(fg_grad_y);
+done:
+    free(unknown);
+    free(x);
+    free(r);
+    free(pdir);
+    free(Ap);
+    free(tmp);
+    return rc;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
 
-/**
- * Composite foreground onto background using the specified blend mode and alpha mask.
- *
- * @param operation   Blend operation: "alpha", "difference", or "poisson"
- * @param background  Background image (RGB, w*h*3 bytes)
- * @param foreground  Foreground image (RGB, w*h*3 bytes)
- * @param alpha       Alpha mask (grayscale, w*h bytes, values [0,255])
- * @param width       Image width
- * @param height      Image height
- * @param result      Output buffer (caller must allocate w*h*3 bytes)
- */
-void composite_images(const char *operation, const uint8_t *background,
+int composite_images(const char *operation, const uint8_t *background,
                      const uint8_t *foreground, const uint8_t *alpha,
                      int width, int height, uint8_t *result) {
-    if (!operation || !background || !foreground || !alpha || !result) return;
+    if (!operation || !background || !foreground || !alpha || !result) return -1;
 
-    memset(result, 0, (size_t)width * height * 3 * sizeof(uint8_t));
+    size_t count = 0;
+    if (checked_pixel_count(width, height, &count) != 0) return -1;
 
     if (strcmp(operation, "difference") == 0) {
-        blend_difference(background, foreground, alpha, width, height, result);
-    } else if (strcmp(operation, "poisson") == 0) {
-        poisson_blend_simple(background, foreground, alpha, width, height, result);
-    } else {
-        // Default to standard alpha blending
-        alpha_blend(background, foreground, alpha, width, height, result);
+        blend_difference(background, foreground, alpha, count, result);
+        return 0;
     }
+    if (strcmp(operation, "poisson") == 0) {
+        return poisson_blend(background, foreground, alpha, width, height, count, result);
+    }
+    alpha_blend(background, foreground, alpha, count, result);
+    return 0;
 }

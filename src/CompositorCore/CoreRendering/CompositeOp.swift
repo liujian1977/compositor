@@ -6,6 +6,7 @@ import Foundation
 enum CompositeError: Error {
     case invalidDimensions
     case bufferTooSmall(expected: Int, actual: Int)
+    case operationFailed(String)
 }
 
 /// Image compositing operations.
@@ -23,17 +24,24 @@ public enum CompositeOp {
         var result = [UInt8](repeating: 0, count: expectedCount)
 
         // withCString gives UnsafePointer<Int8> matching C's `const char *operation`.
+        // The C function writes `result` only when it returns 0. A non-zero code
+        // covers invalid arguments, allocation failure, and a Poisson solve that
+        // did not converge — those must not be reported as a successful black image.
+        var rc: Int32 = -1
         operation.withCString { opPtr in
             background.withUnsafeBufferPointer { bgPtr in
                 foreground.withUnsafeBufferPointer { fgPtr in
                     alpha.withUnsafeBufferPointer { alPtr in
                         result.withUnsafeMutableBufferPointer { resPtr in
-                            composite_images(opPtr, bgPtr.baseAddress, fgPtr.baseAddress,
-                                             alPtr.baseAddress, width, height, resPtr.baseAddress)
+                            rc = composite_images(opPtr, bgPtr.baseAddress, fgPtr.baseAddress,
+                                                  alPtr.baseAddress, width, height, resPtr.baseAddress)
                         }
                     }
                 }
             }
+        }
+        guard rc == 0 else {
+            throw CompositeError.operationFailed("composite_images returned \(rc) for \(operation)")
         }
         return result
     }
@@ -50,7 +58,9 @@ public enum CompositeOp {
         try blend(operation: "difference", background: background, foreground: foreground, alpha: alpha, width: width, height: height)
     }
 
-    /// Gradient-domain compositing using simplified Poisson approach.
+    /// Gradient-domain compositing. Solves a masked Poisson equation so the
+    /// foreground Laplacian is preserved inside the mask and the background
+    /// supplies the Dirichlet boundary. Throws if the solve cannot be completed.
     public static func poissonBlend(background: [UInt8], foreground: [UInt8], alpha: [UInt8],
                                     width: Int, height: Int) throws -> [UInt8] {
         try blend(operation: "poisson", background: background, foreground: foreground, alpha: alpha, width: width, height: height)
@@ -67,4 +77,4 @@ func composite_images(
     _ alpha: UnsafePointer<UInt8>?,
     _ width: Int, _ height: Int,
     _ result: UnsafeMutablePointer<UInt8>?
-)
+) -> Int32

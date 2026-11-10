@@ -91,14 +91,66 @@ final class PipelineIntegrationTests: XCTestCase {
         XCTAssertEqual(result.status, "success")
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
 
-        // Verify file size is reasonable (>0 means data was written)
-        let attrs = try FileManager.default.attributesOfItem(atPath: outputURL.path)
-        if let fileSize = attrs[.size] as? Int {
-            XCTAssertGreaterThan(fileSize, 100, "Output PNG should have meaningful file size")
+        // The right half is the only masked region, so it must move toward the
+        // preserved left half (200). The left half must stay 200. A mask that
+        // was ignored would leave the right half at 50.
+        let decoded = try readGray(outputURL)
+        XCTAssertEqual(decoded.width, width)
+        XCTAssertEqual(decoded.height, height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Int(decoded.pixels[y * width + x])
+                if x < 32 {
+                    XCTAssertEqual(value, 200, "unmasked left column \(x) changed")
+                } else {
+                    XCTAssertGreaterThan(value, 170, "masked right column \(x) was not filled from the left")
+                }
+            }
         }
 
         try? FileManager.default.removeItem(at: imageURL)
         try? FileManager.default.removeItem(at: maskURL)
+        try? FileManager.default.removeItem(at: outputURL)
+    }
+
+    /// A black mask preserves every pixel. The photo itself contains 255, so a
+    /// runner that painted the photo into the mask buffer would treat that
+    /// block as a hole and pull it toward the surrounding 0.
+    func testBlackMaskLeavesImageUnchanged() throws {
+        let width = 32, height = 32
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        for y in 12..<20 {
+            for x in 12..<20 { pixels[y * width + x] = 255 }
+        }
+        let imageURL = temporaryFile(suffix: ".png")
+        try saveGrayImage(pixels, width: width, height: height, to: imageURL)
+
+        let maskURL = temporaryFile(suffix: ".png")
+        try saveGrayImage([UInt8](repeating: 0, count: width * height), width: width, height: height, to: maskURL)
+
+        let outputURL = temporaryFile(suffix: ".png")
+        let runner = InpaintCommandRunner(
+            image: imageURL, mask: maskURL, algorithm: "patch-based",
+            laMaPreset: "balanced", output: outputURL, format: .text
+        )
+        let result = try runner.execute()
+        XCTAssertEqual(result.status, "success")
+
+        let decoded = try readGray(outputURL)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = Int(decoded.pixels[y * width + x])
+                if x >= 12 && x < 20 && y >= 12 && y < 20 {
+                    XCTAssertGreaterThan(value, 250, "black mask must keep the bright block")
+                } else {
+                    XCTAssertLessThan(value, 5, "black mask must keep the surround")
+                }
+            }
+        }
+
+        try? FileManager.default.removeItem(at: imageURL)
+        try? FileManager.default.removeItem(at: maskURL)
+        try? FileManager.default.removeItem(at: outputURL)
     }
 
     // MARK: - Helpers
@@ -120,5 +172,24 @@ final class PipelineIntegrationTests: XCTestCase {
 
     private func temporaryFile(suffix: String) -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory().appending("/compositor-test-\(UUID().uuidString)\(suffix)"))
+    }
+
+    private func readGray(_ url: URL) throws -> (pixels: [UInt8], width: Int, height: Int) {
+        let data = try Data(contentsOf: url)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NSError(domain: "TestError", code: 3, userInfo: nil)
+        }
+        let w = image.width, h = image.height
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            throw NSError(domain: "TestError", code: 4, userInfo: nil)
+        }
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return (pixels, w, h)
     }
 }

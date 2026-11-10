@@ -87,7 +87,12 @@ struct InpaintCommandRunner {
 
         // Patch-based inpainting (default) — only reached when algo != "lama"
         let inpaintStart = DispatchTime.now()
-        result = try runPatchInpaint(cgImage, mask: maskCG, width: width, height: height, stride: stride)
+        do {
+            result = try runPatchInpaint(cgImage, mask: maskCG, width: width, height: height, stride: stride)
+        } catch {
+            let detail = (error as? LocalizedError)?.errorDescription ?? "Patch inpaint failed"
+            return CommandResult.makeError(.renderFailed, detail: detail, timing: nil)
+        }
         let inpaintEnd = DispatchTime.now()
         inpaintTimeMs = dispatchTimeIntervalMs(inpaintStart, inpaintEnd)
         phases.append(.init(name: "inpainting", ms: inpaintTimeMs))
@@ -131,25 +136,32 @@ struct InpaintCommandRunner {
     }
 
     private func runPatchInpaint(_ cgImage: CGImage, mask: CGImage, width: Int, height: Int, stride: Int) throws -> [UInt8] {
-        // Read image as RGBA8 by drawing into a context
+        // RGBA image. `stride` is the byte row stride passed to C (pixel at y * stride + x * 4).
         var imgData = [UInt8](repeating: 0, count: stride * height)
-        let ctx = CGContext(data: &imgData, width: width, height: height, bitsPerComponent: 8, bytesPerRow: stride,
-                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        guard let ctx = CGContext(data: &imgData, width: width, height: height, bitsPerComponent: 8, bytesPerRow: stride,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            throw CoreError.renderFailed(reason: "Cannot create image context")
+        }
+        ctx.interpolationQuality = .none
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Read mask as grayscale → binary (255 = fill, 0 = preserve)
-        var maskData = [UInt8](repeating: 0, count: max(stride, width) * height)
-        let mctx = CGContext(data: &maskData, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
-                             space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
-        // Draw mask as grayscale (CGContext will handle color space conversion)
-        let grayMask = cgImage.copy(colorSpace: CGColorSpaceCreateDeviceGray()) ?? mask
-        mctx.draw(grayMask, in: CGRect(x: 0, y: 0, width: width, height: height))
+        // Mask is one byte per pixel and does not share the image stride.
+        // bytesPerRow here is maskStride; C indexes mask[y * maskStride + x].
+        let maskStride = width
+        var maskData = [UInt8](repeating: 0, count: maskStride * height)
+        guard let mctx = CGContext(data: &maskData, width: width, height: height, bitsPerComponent: 8,
+                                   bytesPerRow: maskStride, space: CGColorSpaceCreateDeviceGray(),
+                                   bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+            throw CoreError.renderFailed(reason: "Cannot create mask context")
+        }
+        mctx.interpolationQuality = .none
+        // Draw the user mask. The gray context converts it; do not substitute the photo.
+        mctx.draw(mask, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Run patch-based inpainting (search radius = 64px)
-        let result = try PatchInpaintOp.inpaint(
-            image: imgData, mask: maskData, width: width, height: height, stride: stride, searchRadius: 64
+        return try PatchInpaintOp.inpaint(
+            image: imgData, mask: maskData, width: width, height: height,
+            stride: stride, maskStride: maskStride, searchRadius: 64
         )
-        return result
     }
 
     private func dispatchTimeIntervalMs(_ start: DispatchTime, _ end: DispatchTime) -> Int {
