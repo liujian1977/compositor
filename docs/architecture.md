@@ -303,7 +303,7 @@ enum CommandError: LocalizedError {
 - `face-detect`：Vision Foundation 人脸检测（内置，无需下载模型）
 - `pose-estimate`：Core RTMPose 身体关键点模型（需要一次性 Python → CoreML 转换）
 - `face-swap`：InsightFace 面部替换（需要一次性 Python → CoreML 转换）
-- `composite`：Alpha 混合 + Poisson 融合，通过 CoreC 像素操作
+- `composite`：不同尺寸的前景可按 ProjectManifest.Transform 平移、缩放、旋转后再做 Alpha / Poisson 融合
 - `pipeline`：多步编排命令
 
 ### 实际交付的文件（与计划文件名略有出入）

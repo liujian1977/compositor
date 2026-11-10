@@ -375,10 +375,12 @@ extension CompositorCLI {
                 output: URL(fileURLWithPath: output),
                 format: format
             )
-            let result = try cmd.execute()
-            if case .json = format {
-                print(String(data: result.toJSON(), encoding: .utf8)!)
+            let outcome = try cmd.execute()
+            if outcome.result.status == "success", let document = outcome.document {
+                print(document)
+                return
             }
+            print(String(data: outcome.result.toJSON(), encoding: .utf8)!)
         }
     }
 
@@ -398,6 +400,12 @@ extension CompositorCLI {
         @Option(help: "Face swap model. Default: insightface")
         var model: String = "insightface"
 
+        @Option(name: .customLong("face-index"), help: "0-based index into faces sorted by confidence, then area. Applies to the target image.")
+        var faceIndex: Int?
+
+        @Option(name: .customLong("target-box"), help: "Target face box 'x,y,width,height' in top-left pixels. Picks the greatest overlap.")
+        var targetBox: String?
+
         @Option(help: "Output path for the result image")
         var output: String = ""
 
@@ -409,6 +417,8 @@ extension CompositorCLI {
                 sourceFaceURL: URL(fileURLWithPath: source),
                 targetImageURL: URL(fileURLWithPath: target),
                 model: model,
+                faceIndex: faceIndex,
+                targetBoxText: targetBox,
                 output: URL(fileURLWithPath: output),
                 format: format
             )
@@ -438,6 +448,24 @@ extension CompositorCLI {
         @Option(help: "Blend mode (alpha|difference|poisson). Default: alpha")
         var blendMode: String = "alpha"
 
+        @Option(name: .customLong("origin"), help: "Layer top-left before rotation, 'x,y' in background pixels. Default: 0,0")
+        var origin: String?
+
+        @Option(name: .customLong("size"), help: "Displayed layer size 'width,height' in background pixels. Default: foreground pixel size")
+        var placedSize: String?
+
+        @Option(help: "Clockwise rotation in degrees around the layer center. Default: 0")
+        var rotation: Double = 0
+
+        @Flag(name: .customLong("flip-x"), help: "Flip the layer horizontally in local space.")
+        var flipX: Bool = false
+
+        @Flag(name: .customLong("flip-y"), help: "Flip the layer vertically in local space.")
+        var flipY: Bool = false
+
+        @Option(help: "Sampling (Nearest|Smooth|High quality). Default: Nearest")
+        var sampling: String = "Nearest"
+
         @Option(help: "Output path for the result image")
         var output: String = ""
 
@@ -450,6 +478,12 @@ extension CompositorCLI {
                 backgroundURL: URL(fileURLWithPath: background),
                 maskURL: mask.map { URL(fileURLWithPath: $0) },
                 blendMode: blendMode,
+                originText: origin,
+                sizeText: placedSize,
+                rotationDegrees: rotation,
+                flipX: flipX,
+                flipY: flipY,
+                sampling: sampling,
                 output: URL(fileURLWithPath: output),
                 format: format
             )

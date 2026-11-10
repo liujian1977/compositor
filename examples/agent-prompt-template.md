@@ -286,6 +286,9 @@ When the user gives you a natural language request:
    - "soften the edge", "make it tighter" → `selection-modify --operation feather/contract`
    - "invert / add / subtract masks" → `selection-modify --operation invert|union|intersect|subtract`
    - "how much of the mask is selected", "where is the selection" → `inspect`
+   - "put this sticker on the poster", different-sized composite → `composite` with `--origin`, `--size`, `--rotation`
+   - "swap the person on the left" → `face-swap --face-index` or `--target-box`
+   - "keypoints for everyone" → `pose-estimate` (stdout is the people JSON)
 
 2. **Assess complexity:**
    - Simple subject on plain background? Use default (`vision`, no refinement).

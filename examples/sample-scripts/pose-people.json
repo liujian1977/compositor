@@ -1,0 +1,15 @@
+{
+    "description": "Estimate keypoints for every detected person and print clean JSON",
+    "steps": [
+        {
+            "command": "compositor pose-estimate",
+            "args": {
+                "--input": "./group.jpg",
+                "--model": "rtmpose",
+                "--output": "./poses.json"
+            },
+            "expected_status": "success",
+            "notes": "Success stdout is one compact JSON object: width, height, person_count, people[].index/score/bbox/keypoints. The same document is written to --output. People are ordered by score, then top-to-bottom, then left-to-right. If Vision finds nobody, the whole frame is one person with score 0."
+        }
+    ]
+}

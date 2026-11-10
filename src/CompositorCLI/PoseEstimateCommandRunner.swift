@@ -1,8 +1,8 @@
 // PoseEstimateCommandRunner.swift — body keypoint estimation using Core ML RTMPose model
 // Model: rtmpose-m 256x192 (SimCC head), converted via tools/convert_models.py.
-// Pipeline mirrors the reference preprocessing: full-image bbox (padding 1.25),
-// aspect-ratio-preserving fit into 192x256, model applies ImageNet normalization
-// internally, output decoded via SimCC argmax / split_ratio.
+// People are detected first (Vision human rectangles, or the whole frame when
+// none are found). Each box is fit with pose_fit and the keypoints are unmapped
+// with pose_unmap. Stdout is the multi-person JSON from pose_people_json.
 
 import Foundation
 import CoreGraphics
@@ -11,25 +11,18 @@ import CompositorCore
 #if canImport(CoreML)
 @preconcurrency import CoreML
 #endif
+#if canImport(Vision)
+@preconcurrency import Vision
+#endif
 #if canImport(CoreVideo)
 import CoreVideo
 #endif
 
-/// Represents a single body keypoint with position and confidence (COCO-17 layout).
-struct Keypoint: Codable {
-    let id: Int
-    let name: String
-    let x: Double
-    let y: Double
-    let confidence: Double
+struct PoseEstimateOutcome {
+    let result: CommandResult
+    /// Multi-person document without a trailing newline. Nil on failure.
+    let document: String?
 }
-
-private let cocoKeypointNames = [
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle",
-]
 
 struct PoseEstimateCommandRunner {
     let input: URL
@@ -42,20 +35,20 @@ struct PoseEstimateCommandRunner {
     /// Padding around the full-image bbox, matching MMPose whole-image inference.
     private static let bboxPadding = 1.25
 
-    func execute() throws -> CommandResult {
+    func execute() throws -> PoseEstimateOutcome {
         let phaseStart = DispatchTime.now()
         var phases: [CommandResult.TimingEntry.PhaseEntry] = []
 
         // Phase 1: Read input image
         if CompositorCLI.isVerbose() { fputs("[compositor] Reading input...\n", stderr) }
         guard FileManager.default.fileExists(atPath: input.path) else {
-            return CommandResult.makeError(.fileNotFound, detail: "Input file not found: \(input.path)", timing: nil)
+            return failure(.fileNotFound, detail: "Input file not found: \(input.path)")
         }
 
         let imageData = try Data(contentsOf: input)
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return CommandResult.makeError(.invalidImageFormat, detail: "Cannot decode image at \(input.path)", timing: nil)
+            return failure(.invalidImageFormat, detail: "Cannot decode image at \(input.path)")
         }
 
         let readPhase = DispatchTime.now()
@@ -70,156 +63,171 @@ struct PoseEstimateCommandRunner {
             mlModel = try ModelLoader.loadModel(for: ModelIdentifier(key: "pose-\(model)"))
             guard let imageDesc = mlModel.modelDescription.inputDescriptionsByName.values.first(where: { $0.type == .image }),
                   let constraint = imageDesc.imageConstraint else {
-                return CommandResult.makeError(.inferenceFailed, detail: "Pose model has no image input", timing: nil)
+                return failure(.inferenceFailed, detail: "Pose model has no image input")
             }
             inputW = Int(constraint.pixelsWide)
             inputH = Int(constraint.pixelsHigh)
         } catch let error as CoreError {
-            return CommandResult.makeError(
-                error.cliErrorType == "modelMissing" ? .modelMissing : .inferenceFailed,
-                detail: error.errorDescription ?? "model load failed",
-                hint: error.cliHint ?? "Convert with 'python3 tools/convert_models.py \(model)'",
-                timing: nil
+            let kind: CommandErrorType = error.cliErrorType == "modelMissing" ? .modelMissing : .inferenceFailed
+            return PoseEstimateOutcome(
+                result: CommandResult.makeError(
+                    kind,
+                    detail: error.errorDescription ?? "model load failed",
+                    hint: error.cliHint ?? "Convert with 'python3 tools/convert_models.py \(model)'",
+                    timing: nil
+                ),
+                document: nil
             )
         } catch {
-            return CommandResult.makeError(.inferenceFailed, detail: error.localizedDescription, timing: nil)
+            return failure(.inferenceFailed, detail: error.localizedDescription)
         }
 
         let loadPhase = DispatchTime.now()
         phases.append(.init(name: "load_model", ms: dispatchTimeIntervalMs(readPhase, loadPhase)))
 
-        // Phase 3: Preprocess — aspect-preserving fit of the padded full image
-        if CompositorCLI.isVerbose() { fputs("[compositor] Preprocessing image...\n", stderr) }
-        let fit: FitTransform
-        let pixelBuffer: CVPixelBuffer
+        // Phase 3: Detect people, then estimate each one. No detections fall back to the whole frame.
+        if CompositorCLI.isVerbose() { fputs("[compositor] Detecting people...\n", stderr) }
+        let people: [PosePersonBox]
         do {
-            fit = try FitTransform(imageSize: CGSize(width: cgImage.width, height: cgImage.height),
-                                   canvasSize: CGSize(width: inputW, height: inputH),
-                                   padding: Self.bboxPadding)
-            pixelBuffer = try fit.makePixelBuffer(from: cgImage)
+            people = try detectedPeople(in: cgImage)
         } catch {
-            return CommandResult.makeError(.renderFailed, detail: "Preprocessing failed: \(error.localizedDescription)", timing: nil)
+            return failure(.inferenceFailed, detail: "Person detection failed: \(error.localizedDescription)")
         }
 
-        let preprocessPhase = DispatchTime.now()
-        phases.append(.init(name: "preprocess", ms: dispatchTimeIntervalMs(loadPhase, preprocessPhase)))
+        let detectPhase = DispatchTime.now()
+        phases.append(.init(name: "person_detection", ms: dispatchTimeIntervalMs(loadPhase, detectPhase)))
 
-        // Phase 4: Run Core ML inference + SimCC decode
-        if CompositorCLI.isVerbose() { fputs("[compositor] Running pose estimation...\n", stderr) }
-        let keypoints: [Keypoint]
+        if CompositorCLI.isVerbose() { fputs("[compositor] Estimating \(people.count) person(s)...\n", stderr) }
+        var estimated: [(box: PosePersonBox, keypoints: [PoseKeypointValue])] = []
         do {
-            keypoints = try runPoseInference(model: mlModel, input: pixelBuffer,
-                                             fit: fit, splitRatio: Self.simccSplitRatio)
+            for person in people {
+                let fit = try PoseLayout.fit(
+                    box: person, padding: Self.bboxPadding,
+                    canvasWidth: Double(inputW), canvasHeight: Double(inputH)
+                )
+                let buffer = try renderCanvas(
+                    from: cgImage, scale: fit.scale, centerX: fit.centerX, centerY: fit.centerY,
+                    canvasWidth: inputW, canvasHeight: inputH
+                )
+                let keypoints = try runPoseInference(
+                    model: mlModel, input: buffer,
+                    scale: fit.scale, centerX: fit.centerX, centerY: fit.centerY,
+                    canvasWidth: Double(inputW), canvasHeight: Double(inputH),
+                    splitRatio: Self.simccSplitRatio
+                )
+                estimated.append((person, keypoints))
+            }
         } catch let error as CoreError {
-            return CommandResult.makeError(.inferenceFailed, detail: error.errorDescription ?? "inference failed", timing: nil)
+            return failure(.inferenceFailed, detail: error.errorDescription ?? "inference failed")
         } catch {
-            return CommandResult.makeError(.inferenceFailed, detail: error.localizedDescription, timing: nil)
+            return failure(.inferenceFailed, detail: error.localizedDescription)
         }
 
         let inferencePhase = DispatchTime.now()
-        phases.append(.init(name: "pose_estimation", ms: dispatchTimeIntervalMs(preprocessPhase, inferencePhase)))
+        phases.append(.init(name: "pose_estimation", ms: dispatchTimeIntervalMs(detectPhase, inferencePhase)))
 
-        // Phase 5: Write output JSON
-        if CompositorCLI.isVerbose() { fputs("[compositor] Writing results...\n", stderr) }
+        let document: String
         do {
-            try writeKeypointsOutput(keypoints, to: output)
+            document = try PoseLayout.peopleJSON(width: cgImage.width, height: cgImage.height, people: estimated)
+            let directory = output.deletingLastPathComponent()
+            if !directory.path.isEmpty && !FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+            try (document + "\n").write(to: output, atomically: true, encoding: .utf8)
         } catch {
-            return CommandResult.makeError(.renderFailed, detail: "Cannot write output: \(error.localizedDescription)", timing: nil)
+            return failure(.renderFailed, detail: "Cannot write output: \(error.localizedDescription)")
         }
 
         let writePhase = DispatchTime.now()
         phases.append(.init(name: "write_output", ms: dispatchTimeIntervalMs(inferencePhase, writePhase)))
-
+        _ = format
         let totalMs = max(dispatchTimeIntervalMs(phaseStart, writePhase), 1)
         let timing = CommandResult.TimingEntry(total_ms: totalMs + phases.reduce(0) { $0 + $1.ms }, phases: phases)
-
-        switch format {
-        case .text:
-            print("Detected \(keypoints.count) keypoint(s). Results written to \(output.path)")
-        case .json:
-            break
-        }
-
-        return CommandResult.makeSuccess(output: output.path, timing: timing)
+        return PoseEstimateOutcome(
+            result: CommandResult.makeSuccess(output: output.path, timing: timing),
+            document: document
+        )
     }
 
-    // MARK: - Preprocessing (aspect-preserving fit, no rotation)
+    private func failure(_ type: CommandErrorType, detail: String) -> PoseEstimateOutcome {
+        PoseEstimateOutcome(result: CommandResult.makeError(type, detail: detail, timing: nil), document: nil)
+    }
 
-    /// Maps the source image into the model canvas with uniform scale + centering.
-    /// Equivalent to MMPose's warpAffine with rot=0 and aspect-fixed bbox scale.
-    private struct FitTransform {
-        let scale: Double          // uniform source->canvas scale
-        let center: CGPoint        // source center in source pixel coords
-        let canvasCenter: CGPoint  // canvas center
-        let canvasSize: CGSize
-
-        init(imageSize: CGSize, canvasSize: CGSize, padding: Double) throws {
-            guard imageSize.width > 0, imageSize.height > 0 else {
-                throw CoreError.invalidImageFormat(url: URL(fileURLWithPath: "?"), reason: "empty image")
+    /// Vision rectangles when available. An empty detection becomes one full-frame box
+    /// so a single subject still gets a pose. Ordering is PoseLayout.sorted.
+    private func detectedPeople(in image: CGImage) throws -> [PosePersonBox] {
+        let width = Double(image.width)
+        let height = Double(image.height)
+        var boxes: [PosePersonBox] = []
+#if canImport(Vision)
+        let request = VNDetectHumanRectanglesRequest()
+        request.upperBodyOnly = false
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        if let observations = request.results as? [VNHumanObservation] {
+            for observation in observations {
+                let rect = observation.boundingBox
+                let boxW = Double(rect.width) * width
+                let boxH = Double(rect.height) * height
+                let boxX = Double(rect.origin.x) * width
+                let boxY = (1.0 - Double(rect.origin.y)) * height - boxH
+                guard boxW > 1, boxH > 1 else { continue }
+                boxes.append(PosePersonBox(
+                    x: boxX, y: boxY, width: boxW, height: boxH, score: Double(observation.confidence)
+                ))
             }
-            let bboxW = Double(imageSize.width) * padding
-            let bboxH = Double(imageSize.height) * padding
-            // Fix aspect ratio to canvas aspect, like MMPose _fix_aspect_ratio.
-            // With a full-image bbox the fixed bbox is always canvas-aspect, so
-            // uniform scale = canvas width / fixed bbox width.
-            let canvasAspect = Double(canvasSize.width) / Double(canvasSize.height)
-            let fixedW = max(bboxW, bboxH * canvasAspect)
-            self.scale = Double(canvasSize.width) / fixedW
-            self.center = CGPoint(x: Double(imageSize.width) / 2, y: Double(imageSize.height) / 2)
-            self.canvasCenter = CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2)
-            self.canvasSize = canvasSize
         }
-
-        func makePixelBuffer(from cgImage: CGImage) throws -> CVPixelBuffer {
-            let w = Int(canvasSize.width), h = Int(canvasSize.height)
-            var pb: CVPixelBuffer?
-            let status = CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32ARGB,
-                                             [kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue!,
-                                              kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue!] as CFDictionary,
-                                             &pb)
-            guard status == kCVReturnSuccess, let buffer = pb else {
-                throw CoreError.renderFailed(reason: "Failed to create CVPixelBuffer")
-            }
-            CVPixelBufferLockBaseAddress(buffer, [])
-            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-            guard let base = CVPixelBufferGetBaseAddress(buffer),
-                  let ctx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8,
-                                      bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-                                      space: CGColorSpace(name: CGColorSpace.sRGB),
-                                      bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)) else {
-                throw CoreError.renderFailed(reason: "Failed to create preprocessing context")
-            }
-            ctx.setFillColor(red: 0, green: 0, blue: 0, alpha: 1)
-            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-
-            // In canvas coords (y-down) the image content maps to:
-            //   x: [cx - scale*imgW/2, cx + scale*imgW/2]
-            //   y: [cy - scale*imgH/2, cy + scale*imgH/2]
-            // CGContext is y-up, so mirror vertically: y_cg = canvasH - y_down.
-            let imgW = Double(cgImage.width) * scale
-            let imgH = Double(cgImage.height) * scale
-            let x0 = canvasCenter.x - imgW / 2
-            let yDown0 = canvasCenter.y - imgH / 2
-            let yCg0 = Double(canvasSize.height) - yDown0 - imgH
-            ctx.draw(cgImage, in: CGRect(x: x0, y: yCg0, width: imgW, height: imgH))
-            return buffer
+#endif
+        if boxes.isEmpty {
+            boxes = [PosePersonBox(x: 0, y: 0, width: width, height: height, score: 0)]
         }
+        return try PoseLayout.sorted(boxes)
+    }
 
-        /// Map a canvas-space keypoint (y-down, before split ratio) back to image pixels.
-        func unmap(canvasPoint: CGPoint) -> CGPoint {
-            let s = CGFloat(scale)
-            let cx = CGFloat(center.x), cy = CGFloat(center.y)
-            // dst = (p - canvasCenter)/scale + center, inverse of draw mapping.
-            let x = (canvasPoint.x - canvasCenter.x) / s + cx
-            let y = (canvasPoint.y - canvasCenter.y) / s + cy
-            return CGPoint(x: x, y: y)
+    /// Draw the source so pose_unmap is the inverse. Scale and center come from pose_fit.
+    private func renderCanvas(
+        from cgImage: CGImage, scale: Double, centerX: Double, centerY: Double,
+        canvasWidth: Int, canvasHeight: Int
+    ) throws -> CVPixelBuffer {
+        var pb: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, canvasWidth, canvasHeight, kCVPixelFormatType_32ARGB,
+            [kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue!,
+             kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue!] as CFDictionary,
+            &pb
+        )
+        guard status == kCVReturnSuccess, let buffer = pb else {
+            throw CoreError.renderFailed(reason: "Failed to create CVPixelBuffer")
         }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer),
+              let ctx = CGContext(
+                data: base, width: canvasWidth, height: canvasHeight, bitsPerComponent: 8,
+                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                space: CGColorSpace(name: CGColorSpace.sRGB),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+              ) else {
+            throw CoreError.renderFailed(reason: "Failed to create preprocessing context")
+        }
+        ctx.setFillColor(red: 0, green: 0, blue: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
+        let canvasW = Double(canvasWidth)
+        let canvasH = Double(canvasHeight)
+        let drawW = Double(cgImage.width) * scale
+        let drawH = Double(cgImage.height) * scale
+        let x0 = canvasW * 0.5 + (0 - centerX) * scale
+        let yDown0 = canvasH * 0.5 + (0 - centerY) * scale
+        let yCg0 = canvasH - yDown0 - drawH
+        ctx.draw(cgImage, in: CGRect(x: x0, y: yCg0, width: drawW, height: drawH))
+        return buffer
     }
 
     // MARK: - Inference
 
     private func runPoseInference(model: MLModel, input: CVPixelBuffer,
-                                  fit: FitTransform, splitRatio: Double) throws -> [Keypoint] {
+                                  scale: Double, centerX: Double, centerY: Double,
+                                  canvasWidth: Double, canvasHeight: Double,
+                                  splitRatio: Double) throws -> [PoseKeypointValue] {
 #if canImport(CoreML)
         let provider = try MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: input)])
         let prediction = try model.prediction(from: provider)
@@ -247,7 +255,7 @@ struct PoseEstimateCommandRunner {
         let inputW = Double(dimX) / splitRatio
         let inputH = Double(dimY) / splitRatio
 
-        var keypoints: [Keypoint] = []
+        var keypoints: [PoseKeypointValue] = []
         for k in 0..<numK {
             var bestXi = 0, bestYi = 0
             var bestXv = -Double.infinity, bestYv = -Double.infinity
@@ -260,17 +268,14 @@ struct PoseEstimateCommandRunner {
             let score = min(bestXv, bestYv)
 
             // SimCC coords → canvas pixel (y-down), then unmap to image pixels.
-            let canvasPt = CGPoint(x: Double(bestXi) / splitRatio, y: Double(bestYi) / splitRatio)
-            _ = inputW; _ = inputH  // unmap uses fit.scale/centers derived from same aspect
-            let imgPt = fit.unmap(canvasPoint: canvasPt)
-
-            keypoints.append(Keypoint(
-                id: k,
-                name: k < cocoKeypointNames.count ? cocoKeypointNames[k] : "keypoint_\(k)",
-                x: imgPt.x,
-                y: imgPt.y,
-                confidence: score
-            ))
+            let mapped = try PoseLayout.unmap(
+                canvasX: Double(bestXi) / splitRatio,
+                canvasY: Double(bestYi) / splitRatio,
+                scale: scale, centerX: centerX, centerY: centerY,
+                canvasWidth: canvasWidth, canvasHeight: canvasHeight
+            )
+            _ = inputW; _ = inputH
+            keypoints.append(PoseKeypointValue(id: k, x: mapped.x, y: mapped.y, confidence: score))
         }
         return keypoints
 #else
@@ -305,21 +310,6 @@ struct PoseEstimateCommandRunner {
             for i in 0..<count { out[i] = array[i].doubleValue }
         }
         return out
-    }
-
-    // MARK: - Output Writing
-
-    private func writeKeypointsOutput(_ keypoints: [Keypoint], to url: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-
-        let directory = url.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        }
-
-        let data = try encoder.encode(keypoints)
-        try data.write(to: url)
     }
 
     // MARK: - Timing Helper

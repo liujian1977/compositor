@@ -37,8 +37,13 @@ echo "cc=$CC"
 "$CC" $CFLAGS -DCOMPOSITOR_C_TESTS -I"$CORE" \
     "$TESTS/test_mask_ops.c" "$CORE/MaskOps.c" \
     -lm -o "$OUT/test_mask_ops"
+"$CC" $CFLAGS -DCOMPOSITOR_C_TESTS -I"$CORE" \
+    "$TESTS/test_layer_pose.c" "$CORE/LayerPlacement.c" "$CORE/CompositeOp.c" \
+    "$CORE/FaceSelect.c" "$CORE/PoseLayout.c" \
+    -lm -o "$OUT/test_layer_pose"
 
 "$OUT/test_composite_poisson"
 "$OUT/test_patch_inpaint"
 "$OUT/test_mask_ops"
+"$OUT/test_layer_pose"
 echo "ALL C SANITIZER TESTS PASSED"

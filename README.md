@@ -24,6 +24,10 @@ compositor inpaint --image scene.jpg --mask obj_mask.png --algorithm lama --outp
 # 扩展选区 10 像素
 compositor selection-modify --input sel.png --operation expand --amount 10 --unit pixels --output expanded.png
 
+# 把小图放到大图上（origin/size/rotation 即 ProjectManifest.Transform）
+compositor composite --foreground sticker.png --background poster.png \
+    --origin 40,80 --size 200,120 --rotation 12 --output poster.png
+
 # JSON 格式输出便于解析
 compositor extract --input photo.jpg --output mask.png --format json
 ```

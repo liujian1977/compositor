@@ -468,38 +468,64 @@ compositor face-detect \
 
 ### 命令：pose-estimate ✅（命令已实现 — 需模型转换）
 
-使用 Core ML 模型估计人体关键点。
+先检测人，再为每个人估计关键点。成功时 **stdout 只有一份紧凑 JSON**（再加一个换行），同时把同一份文档写到 `--output`。`--format` 可以传，成功时不改变这份文档。失败时 stdout 是和其他命令一样的错误 JSON。
 
 ```bash
-compositor pose \
+compositor pose-estimate \
     --input <image.png> \
     [--model rtmpose|dwpose] \
     --output <poses.json>
 ```
 
-- **模型**：RTMPose 或 DWPose，通过 `coremltools` 转换为 Core ML（Python 一次性转换）
-- 输出：每个关节点的 `{x, y, confidence}` JSON 数组（例如 DWPose 为 133 个点）
-- **状态**：命令与 CoreML 推理已实现（`PoseEstimateCommandRunner.swift`）。模型未转换时返回 `modelMissing` 错误并给出转换提示。详见下方的 Native ML Pipeline 部分。
+人的检测顺序：`score` 从高到低，然后 y 从上到下，然后 x 从左到右。没有检测到人时，用整张图作为一个人（`score` 为 0），这样单人照片仍能出姿态。每个人的框按 1.25 倍 padding 做等比适配后送进模型，关键点再映射回原图像素。
+
+#### 成功 stdout
+
+```json
+{"width":20,"height":10,"person_count":2,"people":[{"index":0,"score":0.5,"bbox":{"x":1,"y":2,"width":4,"height":6},"keypoints":[{"id":5,"name":"left_shoulder","x":1,"y":3,"confidence":0.5}]},{"index":1,"score":-0.25,"bbox":{"x":8,"y":3,"width":5,"height":7},"keypoints":[{"id":17,"name":"keypoint_17","x":2,"y":4,"confidence":-0.5}]}]}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `width` / `height` | 原图尺寸 |
+| `person_count` | `people` 的长度 |
+| `people[].index` | 排序后的下标，从 0 起 |
+| `people[].score` | 检测置信度。整图回退时为 0。可以为负（模型 logit） |
+| `people[].bbox` | 检测框，左上角原点，y 向下，单位像素 |
+| `people[].keypoints[]` | `id` 从 0 起。0–16 使用 COCO 名（`nose` … `right_ankle`），其余为 `keypoint_<id>`。`x`/`y` 是原图像素 |
+
+数字格式与 `inspect` 相同：最多 6 位小数，去掉末尾 0，负数保留符号。
+
+- **模型**：RTMPose 或 DWPose，通过 `coremltools` 转换为 Core ML
+- **状态**：命令与 CoreML 推理已实现。人体框来自 Vision `VNDetectHumanRectanglesRequest`（macOS）。模型未转换时返回 `modelMissing`。Linux 上的测试只覆盖排序、坐标反映射和 JSON，不跑 Vision / Core ML。
 
 ### 命令：face-swap ✅（命令已实现 — 需模型转换）
 
-将一张图像中的人脸替换为另一张图像中的人脸。
+将一张图像中的人脸替换为另一张图像中的人脸。多张脸时用 `--face-index` 或 `--target-box` 指定**目标图**里的哪一张。源图仍取面积最大的那张。
 
 ```bash
 compositor face-swap \
     --source <source_face.jpg> \
     --target <target_image.jpg> \
     [--model insightface] \
+    [--face-index 0] \
+    [--target-box x,y,width,height] \
     --output <result.png>
 ```
 
-- **模型**：InsightFace / SimSwap，通过 `coremltools` 转换为 Core ML
-- 管线：人脸检测（Vision）→ 裁剪 → CoreML 推理 → 羽化混合回原图
-- **状态**：命令与推理/混合已实现（`FaceSwapCommandRunner.swift`）。模型未转换时返回 `modelMissing` 错误并给出转换提示。详见下方的 Native ML Pipeline 部分。
+| 参数 | 含义 |
+|------|------|
+| `--face-index` | 排序后的下标，从 0 起。排序：置信度从高到低，面积从大到小，然后 y、x 从小到大 |
+| `--target-box` | 左上角原点的像素框 `x,y,width,height`。选 IoU 最大的脸，IoU 必须大于 0 |
+| 两个都传 | 框选中的脸必须正好是这个下标，否则报错 |
+| 都不传 | 和以前一样，选面积最大的脸（面积相同则用上面的排序） |
+
+- **模型**：InsightFace，通过 `coremltools` 转换为 Core ML
+- **状态**：选脸规则在 `FaceSelect.c`，可在 Linux 上测试。Vision 检测和 Core ML 换脸只在 macOS 上发生。
 
 ### 命令：composite ✅（已实现 — Phase 2）
 
-将多张图像组合在一起，支持各种混合模式。
+把前景图层放到背景上。前景和背景可以不一样大。放置方式复用 `ProjectManifest.Transform`：`origin`、`size`、`rotation`（顺时针角度）、`flipX` / `flipY`、`sampling`。
 
 ```bash
 compositor composite \
@@ -507,12 +533,28 @@ compositor composite \
     --background <bg.png> \
     [--mask <alpha_mask.png>] \
     [--blend-mode alpha|difference|poisson] \
+    [--origin x,y] \
+    [--size width,height] \
+    [--rotation 0] \
+    [--flip-x] [--flip-y] \
+    [--sampling Nearest|Smooth|High quality] \
     --output <result.png>
 ```
 
-- Alpha 混合 / difference 混合 / Poisson 融合（梯度域，迭代求解）均由 CoreC `CompositeOp.c` 实现
-- `--mask` 省略时使用前景图像自身的 alpha 通道；前景与背景尺寸必须一致
-- **状态**：已实现。`CompositeCommandRunner.swift` + `CompositeOp.c/.h`。
+| 参数 | 默认 | 含义 |
+|------|------|------|
+| `--origin` | `0,0` | 旋转前图层左上角，背景像素，y 向下 |
+| `--size` | 前景的像素尺寸 | 图层在背景上的显示宽高。缩放 = size / 前景像素尺寸 |
+| `--rotation` | `0` | 绕图层中心的顺时针角度 |
+| `--flip-x` / `--flip-y` | 关 | 在局部坐标里镜像，然后再旋转 |
+| `--sampling` | `Nearest` | `Nearest` 取最近像素。`Smooth` 和 `High quality` 都是双线性 |
+| `--mask` | 前景自己的 alpha | 蒙版跟**前景**同尺寸，和颜色一起被采样 |
+
+输出画布就是背景的尺寸。变换后落在背景外的像素被裁掉，不会按旋转后的外接框分配内存。`--sampling Nearest` 且不写 origin/size/rotation 时，同尺寸的前景是逐像素恒等拷贝，和以前的同尺寸合成一致。
+
+Poisson 仍在背景尺寸的缓冲上求解：背景外没有未知量；alpha 为 0 的像素保持背景。常量前景铺满整张图时，解回到背景（拉普拉斯为 0，边界是背景）。
+
+- **状态**：放置在 `LayerPlacement.c`，混合在 `CompositeOp.c`。Linux 上的 ASan/UBSan 测试锁了像素和裁剪后的 Poisson。CoreGraphics 读写没有在这里跑。
 
 ### 命令：pipeline ✅（已实现 — Phase 2 编排层）
 
@@ -606,6 +648,8 @@ compositor pipeline \
 |------|---------------------------------------|
 | `extract` | `read_input`、`segmentation`、`refinement`、`write_output` |
 | `cutout` | `read_input`、`cutout`、`write_output` |
+| `composite` | `read_input`、`prepare`、`place`、`composite`、`write_output` |
+| `pose-estimate` | 成功时 stdout 是上面的多人 JSON，不是这张计时表。内部相位为 `read_input`、`load_model`、`person_detection`、`pose_estimation`、`write_output` |
 | `inspect` | 成功时 stdout **不是**这张计时表，而是上面的检查文档。内部相位为 `read_input`、`inspect`、可选的 `write_output` |
 | `inpaint` | `read_input`、`inpainting`、`write_output` |
 | `selection-modify` | `read_input`、`selection`、`write_output`（或 edge-snap 的 `sobel_compute` + `snap`）。算术操作的相位名也是 `selection` |

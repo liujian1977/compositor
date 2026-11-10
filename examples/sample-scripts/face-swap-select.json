@@ -1,0 +1,17 @@
+{
+    "description": "Swap one chosen face when the target photo has several",
+    "steps": [
+        {
+            "command": "compositor face-swap",
+            "args": {
+                "--source": "./source_face.jpg",
+                "--target": "./group.jpg",
+                "--face-index": "1",
+                "--target-box": "420,180,160,200",
+                "--output": "./group_swapped.png"
+            },
+            "expected_status": "success",
+            "notes": "face-index is the position after sorting by confidence, then area, then y, then x. target-box is top-left pixels and must overlap that same face. The source image still uses its largest face. Omit both flags to keep the previous largest-target behavior."
+        }
+    ]
+}

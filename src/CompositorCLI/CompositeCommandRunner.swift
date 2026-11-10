@@ -10,6 +10,12 @@ struct CompositeCommandRunner {
     let backgroundURL: URL
     let maskURL: URL?           // optional alpha mask; if omitted, uses FG's alpha channel
     let blendMode: String       // "alpha", "difference", or "poisson"
+    let originText: String?     // "x,y"; nil places the layer at (0, 0)
+    let sizeText: String?       // "w,h" displayed size; nil keeps the foreground's pixel size
+    let rotationDegrees: Double // clockwise, y down
+    let flipX: Bool
+    let flipY: Bool
+    let sampling: String        // Nearest | Smooth | High quality
     let output: URL
     let format: OutputFormat
 
@@ -62,50 +68,79 @@ struct CompositeCommandRunner {
         let bgRGB = try extractRGB(bgCG)
         let fgRGB = try extractRGB(fgCG)
 
-        // Determine alpha mask to use
+        // The mask is in foreground source pixels. It is resampled with the layer.
         var alpha: [UInt8]
         if let providedMask = maskData {
-            // Verify dimensions match
             guard providedMask.count == fgCG.width * fgCG.height else {
                 return CommandResult.makeError(.dimensionMismatch, detail: "Mask dimensions (\(providedMask.count)) don't match foreground (\(fgCG.width * fgCG.height))", timing: nil)
             }
             alpha = providedMask
         } else {
-            // Extract alpha channel from foreground image
             alpha = try extractAlphaFromImage(fgCG)
+        }
+
+        let origin: (Double, Double)
+        let placedSize: (Double, Double)
+        do {
+            origin = try parsePair(originText, fallback: (0, 0), name: "--origin")
+            placedSize = try parsePair(sizeText, fallback: (Double(fgCG.width), Double(fgCG.height)), name: "--size")
+        } catch {
+            return CommandResult.makeError(.renderFailed, detail: error.localizedDescription, timing: nil)
         }
 
         let preparePhase = DispatchTime.now()
         phases.append(.init(name: "prepare", ms: dispatchTimeIntervalMs(readPhase, preparePhase)))
 
-        // Phase 3: Run compositing operation
-        if CompositorCLI.isVerbose() { fputs("[compositor] Compositing...\n", stderr) }
-        let width = fgCG.width
-        let height = fgCG.height
-
-        guard bgCG.width == width && bgCG.height == height else {
-            return CommandResult.makeError(.dimensionMismatch,
-                detail: "Background (\(bgCG.width)x\(bgCG.height)) must match foreground (\(width)x\(height))",
-                timing: nil)
+        // Phase 3: Rasterize the layer into the background canvas, then blend.
+        if CompositorCLI.isVerbose() { fputs("[compositor] Placing foreground...\n", stderr) }
+        let width = bgCG.width
+        let height = bgCG.height
+        guard width > 0, height > 0, fgCG.width > 0, fgCG.height > 0 else {
+            return CommandResult.makeError(.invalidImageFormat, detail: "Image has zero dimensions", timing: nil)
         }
 
+        let placed: (rgb: [UInt8], alpha: [UInt8])
+        do {
+            placed = try LayerPlacement.place(
+                foregroundRGB: fgRGB,
+                foregroundAlpha: alpha,
+                foregroundWidth: fgCG.width,
+                foregroundHeight: fgCG.height,
+                backgroundWidth: width,
+                backgroundHeight: height,
+                originX: origin.0,
+                originY: origin.1,
+                sizeWidth: placedSize.0,
+                sizeHeight: placedSize.1,
+                rotationDegrees: rotationDegrees,
+                flipX: flipX,
+                flipY: flipY,
+                sampling: sampling
+            )
+        } catch {
+            return CommandResult.makeError(.renderFailed, detail: "Layer placement failed: \(error.localizedDescription)", timing: nil)
+        }
+
+        let placePhase = DispatchTime.now()
+        phases.append(.init(name: "place", ms: dispatchTimeIntervalMs(preparePhase, placePhase)))
+
+        if CompositorCLI.isVerbose() { fputs("[compositor] Compositing...\n", stderr) }
         var resultRGB: [UInt8]
         do {
             switch blendMode.lowercased() {
             case "difference":
                 resultRGB = try CompositeOp.differenceBlend(
-                    background: bgRGB, foreground: fgRGB, alpha: alpha,
+                    background: bgRGB, foreground: placed.rgb, alpha: placed.alpha,
                     width: width, height: height
                 )
             case "poisson":
                 resultRGB = try CompositeOp.poissonBlend(
-                    background: bgRGB, foreground: fgRGB, alpha: alpha,
+                    background: bgRGB, foreground: placed.rgb, alpha: placed.alpha,
                     width: width, height: height
                 )
             default:
-                // Standard alpha blending (over operator)
                 resultRGB = try CompositeOp.alphaBlend(
-                    background: bgRGB, foreground: fgRGB, alpha: alpha,
+                    background: bgRGB, foreground: placed.rgb, alpha: placed.alpha,
                     width: width, height: height
                 )
             }
@@ -114,7 +149,7 @@ struct CompositeCommandRunner {
         }
 
         let compositePhase = DispatchTime.now()
-        phases.append(.init(name: "composite", ms: dispatchTimeIntervalMs(preparePhase, compositePhase)))
+        phases.append(.init(name: "composite", ms: dispatchTimeIntervalMs(placePhase, compositePhase)))
 
         // Phase 4: Write output PNG
         if CompositorCLI.isVerbose() { fputs("[compositor] Writing result...\n", stderr) }
@@ -210,6 +245,16 @@ struct CompositeCommandRunner {
 
         ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         return pixels
+    }
+
+    /// `"x,y"` pair. Nil text uses `fallback`.
+    private func parsePair(_ text: String?, fallback: (Double, Double), name: String) throws -> (Double, Double) {
+        guard let text, !text.isEmpty else { return fallback }
+        let parts = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, let a = Double(parts[0]), let b = Double(parts[1]), a.isFinite, b.isFinite else {
+            throw CoreError.renderFailed(reason: "\(name) must be two finite numbers, 'a,b'")
+        }
+        return (a, b)
     }
 
     // MARK: - Timing Helper

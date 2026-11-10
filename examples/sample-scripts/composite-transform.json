@@ -1,0 +1,20 @@
+{
+    "description": "Place a smaller foreground on a larger background with ProjectManifest.Transform",
+    "steps": [
+        {
+            "command": "compositor composite",
+            "args": {
+                "--foreground": "./sticker.png",
+                "--background": "./poster.png",
+                "--origin": "40,80",
+                "--size": "200,120",
+                "--rotation": "12",
+                "--sampling": "Smooth",
+                "--blend-mode": "alpha",
+                "--output": "./poster_with_sticker.png"
+            },
+            "expected_status": "success",
+            "notes": "origin/size/rotation/flip/sampling are ProjectManifest.Transform. Output is the background size. Pixels that land outside the background are clipped. Use --blend-mode poisson for a gradient-domain blend of the same placed layer."
+        }
+    ]
+}

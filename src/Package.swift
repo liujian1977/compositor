@@ -23,7 +23,10 @@ let package = Package(
                 "BlurOp.c",
                 "PatchInpaintOp.c",
                 "CompositeOp.c",
-                "MaskOps.c"
+                "MaskOps.c",
+                "LayerPlacement.c",
+                "FaceSelect.c",
+                "PoseLayout.c"
             ],
             publicHeadersPath: "."  // exposes CompositeOp.h, MorphologyOp.h, SobelOp.h, WandOp.h, BlurOp.h, PatchInpaintOp.h, MaskOps.h
         ),
@@ -43,7 +46,10 @@ let package = Package(
                 "CoreRendering/BlurOp.c",
                 "CoreRendering/PatchInpaintOp.c",
                 "CoreRendering/CompositeOp.c",
-                "CoreRendering/MaskOps.c"
+                "CoreRendering/MaskOps.c",
+                "CoreRendering/LayerPlacement.c",
+                "CoreRendering/FaceSelect.c",
+                "CoreRendering/PoseLayout.c"
             ],
             sources: [
                 "CoreDocument/CanvasSize.swift",
@@ -60,7 +66,10 @@ let package = Package(
                 "CoreRendering/BlurOp.swift",
                 "CoreRendering/PatchInpaintOp.swift",
                 "CoreRendering/CompositeOp.swift",
-                "CoreRendering/MaskOps.swift"
+                "CoreRendering/MaskOps.swift",
+                "CoreRendering/LayerPlacement.swift",
+                "CoreRendering/FaceSelect.swift",
+                "CoreRendering/PoseLayout.swift"
             ],
             linkerSettings: [
                 .linkedLibrary("c")  // for memset in C functions

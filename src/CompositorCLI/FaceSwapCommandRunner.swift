@@ -26,6 +26,8 @@ struct FaceSwapCommandRunner {
     let sourceFaceURL: URL       // image containing the source face to swap in
     let targetImageURL: URL      // image where the face will be swapped into
     let model: String            // "insightface"
+    let faceIndex: Int?          // target only; nil keeps the default largest face
+    let targetBoxText: String?   // "x,y,width,height" in top-left pixels
     let output: URL
     let format: OutputFormat
 
@@ -64,16 +66,12 @@ struct FaceSwapCommandRunner {
         let sourceFace: AlignedFace
         let targetFace: AlignedFace
         do {
-            guard let s = try largestAlignedFace(in: sourceCG) else {
-                return CommandResult.makeError(.inferenceFailed, detail: "No face detected in source image",
-                                               hint: "Provide a source image containing a clearly visible face", timing: nil)
-            }
-            sourceFace = s
-            guard let t = try largestAlignedFace(in: targetCG) else {
-                return CommandResult.makeError(.inferenceFailed, detail: "No face detected in target image",
-                                               hint: "Provide a target image containing a clearly visible face", timing: nil)
-            }
-            targetFace = t
+            sourceFace = try chosenFace(in: sourceCG, faceIndex: nil, targetBoxText: nil, role: "source")
+            targetFace = try chosenFace(in: targetCG, faceIndex: faceIndex, targetBoxText: targetBoxText, role: "target")
+        } catch let error as CoreError {
+            let kind: CommandErrorType = error.cliErrorType == "renderFailed" ? .renderFailed : .inferenceFailed
+            return CommandResult.makeError(kind, detail: error.errorDescription ?? "Face detection failed",
+                                           hint: error.cliHint, timing: nil)
         } catch {
             return CommandResult.makeError(.inferenceFailed, detail: "Face detection failed: \(error.localizedDescription)", timing: nil)
         }
@@ -218,17 +216,63 @@ struct FaceSwapCommandRunner {
         let imageToCanvas: Similarity
     }
 
-    private func largestAlignedFace(in cgImage: CGImage) throws -> AlignedFace? {
+    private struct FoundFace {
+        let x, y, width, height, confidence: Double
+        let aligned: AlignedFace
+    }
+
+    private func chosenFace(in cgImage: CGImage, faceIndex: Int?, targetBoxText: String?, role: String) throws -> AlignedFace {
+        let found = try alignedFaces(in: cgImage)
+        if found.isEmpty {
+            throw CoreError.inferenceFailed(reason: "No face detected in \(role) image")
+        }
+        let box = try parsedTargetBox(targetBoxText)
+        guard let index = FaceSelection.choose(
+            x: found.map(\.x), y: found.map(\.y), width: found.map(\.width), height: found.map(\.height),
+            confidence: found.map(\.confidence), faceIndex: faceIndex, targetBox: box
+        ) else {
+            throw CoreError.inferenceFailed(
+                reason: "No face in the \(role) image matched --face-index/\(role == "target" ? "--target-box" : "selection") (\(found.count) detected)"
+            )
+        }
+        return found[index].aligned
+    }
+
+    private func parsedTargetBox(_ text: String?) throws -> (x: Double, y: Double, width: Double, height: Double)? {
+        guard let text, !text.isEmpty else { return nil }
+        let parts = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 4,
+              let x = Double(parts[0]), let y = Double(parts[1]),
+              let w = Double(parts[2]), let h = Double(parts[3]),
+              x.isFinite, y.isFinite, w.isFinite, h.isFinite, w > 0, h > 0 else {
+            throw CoreError.renderFailed(reason: "--target-box must be 'x,y,width,height' with a positive size")
+        }
+        return (x, y, w, h)
+    }
+
+    private func alignedFaces(in cgImage: CGImage) throws -> [FoundFace] {
 #if canImport(Vision)
         let request = VNDetectFaceLandmarksRequest()
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
-        guard let observations = request.results as? [VNFaceObservation], !observations.isEmpty else { return nil }
+        guard let observations = request.results as? [VNFaceObservation], !observations.isEmpty else { return [] }
 
-        // Pick the face with the largest bounding box.
-        let best = observations.max(by: { $0.boundingBox.width * $0.boundingBox.height
-                                        < $1.boundingBox.width * $1.boundingBox.height })!
         let w = Double(cgImage.width), h = Double(cgImage.height)
+        return observations.map { observation in
+            let aligned = align(observation, imageWidth: w, imageHeight: h)
+            let bb = observation.boundingBox
+            let pw = Double(bb.width) * w
+            let ph = Double(bb.height) * h
+            let px = Double(bb.origin.x) * w
+            let py = (1.0 - Double(bb.origin.y)) * h - ph
+            return FoundFace(x: px, y: py, width: pw, height: ph, confidence: Double(observation.confidence), aligned: aligned)
+        }
+#else
+        throw CoreError.inferenceFailed(reason: "Vision Framework not available")
+#endif
+    }
 
+#if canImport(Vision)
+    private func align(_ best: VNFaceObservation, imageWidth w: Double, imageHeight h: Double) -> AlignedFace {
         // Vision: boundingBox is full-image normalized (bottom-left origin);
         // landmark normalizedPoints are RELATIVE to boundingBox (0..1 within it).
         let bb = best.boundingBox
@@ -273,10 +317,8 @@ struct FaceSwapCommandRunner {
                                      rightTemplate: Self.templateRightEye)
         let eyeMid = CGPoint(x: (le.x + re.x) / 2, y: (le.y + re.y) / 2)
         return AlignedFace(eyeMid: eyeMid, imageToCanvas: sim)
-#else
-        throw CoreError.inferenceFailed(reason: "Vision Framework not available")
-#endif
     }
+#endif
 
     private func similarityFromEyes(leftEye: CGPoint, rightEye: CGPoint,
                                     leftTemplate: CGPoint, rightTemplate: CGPoint) -> Similarity {

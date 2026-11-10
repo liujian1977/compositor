@@ -10,5 +10,8 @@
 #include "PatchInpaintOp.h"
 #include "CompositeOp.h"
 #include "MaskOps.h"
+#include "LayerPlacement.h"
+#include "FaceSelect.h"
+#include "PoseLayout.h"
 
 #endif /* CoreC_h */

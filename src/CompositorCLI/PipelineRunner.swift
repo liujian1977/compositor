@@ -346,8 +346,8 @@ final class PipelineRunner {
             output: outputPath,
             format: .json
         )
-        let result = try runner.execute()
-        return stepFromResult("pose-estimate", result, outputs: ["poses": outputPath.path])
+        let outcome = try runner.execute()
+        return stepFromResult("pose-estimate", outcome.result, outputs: ["poses": outputPath.path])
     }
 
     private func runFaceSwapStep(_ inputs: [String: URL]) throws -> PipelineStep {
@@ -363,6 +363,8 @@ final class PipelineRunner {
             sourceFaceURL: source,
             targetImageURL: target,
             model: "insightface",
+            faceIndex: nil,
+            targetBoxText: nil,
             output: outputPath,
             format: .json
         )
@@ -406,6 +408,12 @@ final class PipelineRunner {
             backgroundURL: background,
             maskURL: maskURL,
             blendMode: "alpha",
+            originText: nil,
+            sizeText: nil,
+            rotationDegrees: 0,
+            flipX: false,
+            flipY: false,
+            sampling: "Nearest",
             output: outputPath,
             format: .json
         )
