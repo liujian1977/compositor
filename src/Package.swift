@@ -26,7 +26,9 @@ let package = Package(
                 "MaskOps.c",
                 "LayerPlacement.c",
                 "FaceSelect.c",
-                "PoseLayout.c"
+                "PoseLayout.c",
+                "ModelPrep.c",
+                "ProjectEdit.c"
             ],
             publicHeadersPath: "."  // exposes CompositeOp.h, MorphologyOp.h, SobelOp.h, WandOp.h, BlurOp.h, PatchInpaintOp.h, MaskOps.h
         ),
@@ -49,7 +51,9 @@ let package = Package(
                 "CoreRendering/MaskOps.c",
                 "CoreRendering/LayerPlacement.c",
                 "CoreRendering/FaceSelect.c",
-                "CoreRendering/PoseLayout.c"
+                "CoreRendering/PoseLayout.c",
+                "CoreRendering/ModelPrep.c",
+                "CoreRendering/ProjectEdit.c"
             ],
             sources: [
                 "CoreDocument/CanvasSize.swift",
@@ -69,7 +73,9 @@ let package = Package(
                 "CoreRendering/MaskOps.swift",
                 "CoreRendering/LayerPlacement.swift",
                 "CoreRendering/FaceSelect.swift",
-                "CoreRendering/PoseLayout.swift"
+                "CoreRendering/PoseLayout.swift",
+                "CoreRendering/ModelPrep.swift",
+                "CoreRendering/ProjectEdit.swift"
             ],
             linkerSettings: [
                 .linkedLibrary("c")  // for memset in C functions

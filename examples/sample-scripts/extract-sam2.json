@@ -1,0 +1,17 @@
+{
+    "description": "SAM2 segmentation with a point and a box. Fails visibly if the Core ML package is missing.",
+    "steps": [
+        {
+            "command": "compositor extract",
+            "args": {
+                "--input": "./photo.jpg",
+                "--model": "sam2-lightweight",
+                "--point": "320,240",
+                "--box": "180,80,280,420",
+                "--output": "./subject_mask.png"
+            },
+            "expected_status": "success",
+            "notes": "Prompts are ignored by --model vision and that combination is an error. Without prompts, SAM2 uses a box around the whole image. The package must be sam2-lightweight.mlpackage; a .mlx download alone is inferenceFailed, not a vision fallback."
+        }
+    ]
+}

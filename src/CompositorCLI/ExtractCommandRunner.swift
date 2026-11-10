@@ -60,6 +60,8 @@ struct ExtractCommandRunner {
     let contrastThreshold: Float
     let edgeShift: Int
     let format: OutputFormat
+    let pointText: String? = nil
+    let boxText: String? = nil
 
     func execute() throws -> CommandResult {
         let phaseStart = DispatchTime.now()
@@ -81,14 +83,50 @@ struct ExtractCommandRunner {
         let readPhase = DispatchTime.now()
         phases.append(.init(name: "read_input", ms: dispatchTimeIntervalMs(phaseStart, readPhase)))
 
+        let modelName = (model ?? "vision").lowercased()
+        if (pointText != nil || boxText != nil) && modelName != "sam2-lightweight" {
+            return CommandResult.makeError(
+                .renderFailed,
+                detail: "--point and --box require --model sam2-lightweight",
+                timing: nil
+            )
+        }
+        let segResult: [UInt8]
+        if modelName == "sam2-lightweight" {
+            do {
+                let point = try parsePair(pointText, count: 2, name: "--point")
+                let box = try parsePair(boxText, count: 4, name: "--box")
+                segResult = try CoreMLSegmentation.mask(
+                    image: cgImage,
+                    point: point.map { ($0[0], $0[1]) },
+                    box: box.map { ($0[0], $0[1], $0[2], $0[3]) }
+                )
+            } catch let error as CoreError {
+                let kind: CommandErrorType
+                switch error.cliErrorType {
+                case "modelMissing": kind = .modelMissing
+                case "renderFailed": kind = .renderFailed
+                default: kind = .inferenceFailed
+                }
+                return CommandResult.makeError(kind, detail: error.errorDescription ?? "SAM2 failed", hint: error.cliHint, timing: nil)
+            } catch {
+                return CommandResult.makeError(.inferenceFailed, detail: error.localizedDescription, timing: nil)
+            }
+        } else if modelName != "vision" {
+            return CommandResult.makeError(
+                .modelMissing,
+                detail: "Unknown segmentation model '\(modelName)'",
+                hint: "Use vision or sam2-lightweight",
+                timing: nil
+            )
+        } else {
 #if canImport(Vision) && swift(>=5.9)
-        // Phase 2: Run Vision Foundation segmentation
-        let segResult = try runVisionSegmentation(cgImage, width: cgImage.width, height: cgImage.height)
+            segResult = try runVisionSegmentation(cgImage, width: cgImage.width, height: cgImage.height)
 #else
-        // Fallback: all-white mask (no Vision available on this platform)
-        print("Warning: Vision Framework not available — producing full-mask output")
-        var segResult = [UInt8](repeating: 255, count: cgImage.width * cgImage.height)
+            print("Warning: Vision Framework not available — producing full-mask output")
+            segResult = [UInt8](repeating: 255, count: cgImage.width * cgImage.height)
 #endif
+        }
 
         let segmentationPhase = DispatchTime.now()
         phases.append(.init(name: "segmentation", ms: dispatchTimeIntervalMs(readPhase, segmentationPhase)))
@@ -263,6 +301,19 @@ struct ExtractCommandRunner {
     private func convertToUInt8(_ floats: [Float], width: Int, height: Int) -> [UInt8] {
         guard floats.count == width * height else { return [UInt8](repeating: 255, count: max(width * height, 1)) }
         return floats.map { UInt8(round(min(1.0, max(0.0, $0)) * 255)) }
+    }
+
+    private func parsePair(_ text: String?, count: Int, name: String) throws -> [Double]? {
+        guard let text, !text.isEmpty else { return nil }
+        let parts = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == count else {
+            throw CoreError.renderFailed(reason: "\(name) must be \(count) comma-separated numbers")
+        }
+        let values = parts.compactMap(Double.init)
+        guard values.count == count, values.allSatisfy(\.isFinite) else {
+            throw CoreError.renderFailed(reason: "\(name) must be finite numbers")
+        }
+        return values
     }
 
     private func dispatchTimeIntervalMs(_ start: DispatchTime, _ end: DispatchTime) -> Int {

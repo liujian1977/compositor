@@ -32,7 +32,8 @@ struct CompositorCLI: ParsableCommand {
             PoseEstimateCommand.self,
             FaceSwapCommand.self,
             CompositeCommand.self,
-            PipelineCommand.self
+            PipelineCommand.self,
+            ProjectCommand.self
         ]
     )
 
@@ -78,6 +79,12 @@ extension CompositorCLI {
         @Option(help: "Edge shift (negative=inward contraction in pixels). Default: 0")
         var edgeShift: Int = 0
 
+        @Option(help: "SAM2 foreground point 'x,y' in image pixels. Requires --model sam2-lightweight.")
+        var point: String?
+
+        @Option(help: "SAM2 box 'x,y,width,height' in image pixels. Requires --model sam2-lightweight.")
+        var box: String?
+
         @Option(help: "Output format (text|json)")
         var format: OutputFormat = .text
 
@@ -89,7 +96,9 @@ extension CompositorCLI {
                 refineRadius: refineRadius,
                 contrastThreshold: contrastThreshold,
                 edgeShift: edgeShift,
-                format: format
+                format: format,
+                pointText: point,
+                boxText: box
             )
             let result = try cmd.execute()
             if case .json = format {

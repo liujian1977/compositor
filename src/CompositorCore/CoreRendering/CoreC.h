@@ -13,5 +13,7 @@
 #include "LayerPlacement.h"
 #include "FaceSelect.h"
 #include "PoseLayout.h"
+#include "ModelPrep.h"
+#include "ProjectEdit.h"
 
 #endif /* CoreC_h */

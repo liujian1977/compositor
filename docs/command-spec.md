@@ -38,7 +38,9 @@ compositor extract \
 | 参数 | 类型 | 必填 | 默认值 | 描述 |
 |------|------|------|--------|------|
 | `--input` | URL 路径 | 是 | — | 源图像（JPEG、PNG） |
-| `--model` | 枚举 | 否 | `vision` | 分割模型。`"vision"` = Apple Vision Framework 启发式（内置）。`"sam2-lightweight"` = SAM2（首次使用时 ~35MB 下载） |
+| `--model` | 枚举 | 否 | `vision` | `vision` 用内置启发式。`sam2-lightweight` 必须加载 Core ML 包 `sam2-lightweight.mlpackage`。找不到包时返回 `modelMissing` 或 `inferenceFailed`，**不会**静默退回 vision |
+| `--point` | `x,y` | 否 | — | SAM2 前景点，图像像素，左上角原点。只在 `--model sam2-lightweight` 时有效 |
+| `--box` | `x,y,w,h` | 否 | — | SAM2 框。角点标签为 2 和 3。都不传时用整图默认框 |
 | `--refine-radius` | int | 否 | `0` | Guided Filter 半径，单位为像素。范围 1–20。值为 `0` 则跳过细化 |
 | `--contrast-threshold` | float | 否 | `0.75` | 推开掩码灰度值。`0.0` = 无变化，`1.0` = 在中灰色处硬切割。仅在 refine-radius > 0 时有效 |
 | `--edge-shift` | int | 否 | `0` | 向内（负数）或向外（正数）移动边缘。典型值：`-2` 以去除背景颜色光晕 |
@@ -210,7 +212,7 @@ compositor inpaint \
 | 算法 | 需要模型 | 速度 | 质量 | 引入阶段 |
 |------|---------|------|------|---------|
 | `patch-based` | 无（内置） | 快速（~200ms） | 中等 | v0.1.0 — CoreC/PatchInpaintOp.c 中的 C 实现。适用于小面积均匀区域、划痕 |
-| `lama` | ~195MB 下载 | 慢（M2 Pro 上约 ~4–8s） | SOTA | Phase 2 (stub) — LaMa 通过 MLX 推理。适用于任意掩码尺寸、复杂背景、大对象 |
+| `lama` | Core ML 包 | 取决于瓦片数 | 模型决定 | 需要 `lama-fast.mlpackage`。`fast`/`balanced`/`high` 决定重叠和默认边长（512/512/1024）。模型输入约束优先于预设边长。只有 `.mlx` 权重、没有 mlpackage 时返回 `inferenceFailed`，不会改跑 patch-based |
 
 > **注意**：LaMa 在 v0.1.0 中实现为模型检查 + stub。实际的 MLX 推理后端将在 Core ML 集成完成后的 Phase 2 添加。
 
@@ -556,6 +558,28 @@ Poisson 仍在背景尺寸的缓冲上求解：背景外没有未知量；alpha 
 
 - **状态**：放置在 `LayerPlacement.c`，混合在 `CompositeOp.c`。Linux 上的 ASan/UBSan 测试锁了像素和裁剪后的 Poisson。CoreGraphics 读写没有在这里跑。
 
+### 命令：project ✅
+
+读写 `.comp` 工程。`list` 的成功 stdout 是紧凑 JSON。其它子命令成功时打印一行文本，失败时打印错误 JSON。
+
+```bash
+compositor project list --project ./shot.comp
+
+compositor project add --project ./shot.comp --image ./plate.png \
+    --name Plate --opacity 1 --blend Normal --origin 0,0 --size 1920,1080
+
+compositor project remove --project ./shot.comp --layer 0
+
+compositor project set --project ./shot.comp --layer Plate \
+    --opacity 0.5 --blend Multiply --rotation 8
+
+compositor project flatten --project ./shot.comp --output ./flat.png
+```
+
+`list` 的 JSON：`width`、`height`、`layer_count`、`layers[]`（`index`、`id`、`name`、`opacity`、`blend`、`origin`、`size`、`rotation`、`flip_x`、`flip_y`）。
+
+扁平化从下往上叠。支持的混合模式只有 `Normal`、`Multiply`、`Screen`。其它模式直接报错。图层先按 `ProjectManifest.Transform` 放到画布上，再按不透明度做覆盖。文件名里的 `..` 或绝对路径会被拒绝。
+
 ### 命令：pipeline ✅（已实现 — Phase 2 编排层）
 
 将多个子命令作为单个确定性管线进行编排，输出包含每步计时和中间结果的 JSON。
@@ -720,3 +744,11 @@ ArcFace ±127.5、inswapper /255）烘焙进模型，Swift 侧直接喂原始像
 | **完整管线**（extract→pose-detect→face-swap） | **~3–4s** | 顺序步骤，每个使用原生 Metal/ANE 加速 |
 
 > **注意**：这些是 Phase 2 的预估。实际性能取决于模型量化（推荐 FP16）、输入分辨率以及特定模型架构是否可用 Neural Engine。
+
+### SAM2 / LaMa 的 Core ML 约定（本环境未用真实权重验证）
+
+`sam2-lightweight.mlpackage` 输入名为 `image`（float32 NCHW `1×3×S×S`，RGB 在 `[0,1]`，S 取模型约束，否则 1024）、`point_coords`（`1×N×2`）、`point_labels`（`1×N`，点为 1，框角为 2 和 3）。输出名为 `masks` 或 `mask`。小于 0 或大于 1 的值先做 sigmoid，再以 0 为阈值。
+
+`lama-fast.mlpackage` 输入名为 `image`（`1×3×S×S`，`[0,1]`）和 `mask`（`1×1×S×S`，1 表示填充）。输出名为 `output` 或 `inpainted`。大图按瓦片覆盖后取平均。
+
+名字对不上时返回 `inferenceFailed`，并在 `detail` 里列出模型实际的输入或输出名。

@@ -454,6 +454,22 @@ struct ModelDownloader {
                 return
             }
 
+            let status = (httpResponse as? HTTPURLResponse)?.statusCode ?? -1
+            let body = (try? Data(contentsOf: tempURL)) ?? Data()
+            let head = [UInt8](body.prefix(64))
+            let verdict = ModelPrep.httpPayloadOK(status: status, nbytes: Int64(body.count), head: head)
+            if verdict != 0 {
+                let why: String
+                switch verdict {
+                case -1: why = "HTTP status \(status)"
+                case -2: why = "empty body"
+                default: why = "body looks like an HTML or JSON error page, not model bytes"
+                }
+                lastError = NSError(domain: "ModelDownloader", code: 12, userInfo: [NSLocalizedDescriptionKey: "Refusing download from \(url.absoluteString): \(why)"])
+                sem.signal()
+                return
+            }
+
             // Get file size from HTTP headers or filesystem
             if let httpResponse = httpResponse as? HTTPURLResponse,
                let contentLength = httpResponse.value(forHTTPHeaderField: "Content-Length"),

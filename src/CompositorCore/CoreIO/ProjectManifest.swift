@@ -4,32 +4,32 @@
 import Foundation
 
 /// A parsed .comp project manifest. Immutable once created (copy-on-write mutations).
-struct ProjectManifest: Sendable, Codable {
-    let format: String                    // always "com.compositor.project"
-    let version: Int                      // 1–11 (new saves use 11)
-    let colorSpace: String                // currently "sRGB"
-    let documentID: UUID
-    let width: Int                        // canvas width in pixels
-    let height: Int                       // canvas height in pixels
-    let resolution: Double                // pixels/inch, default 72
-    var activeLayerID: UUID
+public struct ProjectManifest: Sendable, Codable {
+    public let format: String             // always "com.compositor.project"
+    public let version: Int               // 1–11 (new saves use 11)
+    public let colorSpace: String         // currently "sRGB"
+    public let documentID: UUID
+    public let width: Int                 // canvas width in pixels
+    public let height: Int                // canvas height in pixels
+    public let resolution: Double         // pixels/inch, default 72
+    public var activeLayerID: UUID
 
     /// Layers in bottom-to-top render order.
-    var layers: [LayerRecord]
+    public var layers: [LayerRecord]
 
-    struct LayerRecord: Sendable, Codable {
-        let id: UUID                      // must match image file name (without .png)
-        let name: String
-        var imageFile: String?            // nil for adjustment/text layers
-        var maskFile: String?             // optional: "<id>.mask.png"
-        var maskEnabled: Bool = true      // defaults to true when maskFile is present
+    public struct LayerRecord: Sendable, Codable {
+        public let id: UUID               // must match image file name (without .png)
+        public let name: String
+        public var imageFile: String?     // nil for adjustment/text layers
+        public var maskFile: String?      // optional: "<id>.mask.png"
+        public var maskEnabled: Bool = true
 
         /// Layer appearance (version 3+)
-        var opacity: Double = 1.0         // clamped to [0, 1]
-        var blendMode: BlendMode = .normal
+        public var opacity: Double = 1.0  // clamped to [0, 1]
+        public var blendMode: BlendMode = .normal
 
         /// Layer transform in document pixel coordinates (always present)
-        let transform: Transform          // origin, size, rotation, flips, sampling
+        public var transform: Transform   // origin, size, rotation, flips, sampling
 
         /// Optional: adjustment layer settings (version 7+)
         var adjustment: Adjustment?       // nil for normal image layers
@@ -52,7 +52,23 @@ struct ProjectManifest: Sendable, Codable {
             case filename, width, height
         }
 
-        init(from decoder: Decoder) throws {
+        public init(id: UUID, name: String, imageFile: String?, opacity: Double, blendMode: BlendMode, transform: Transform) {
+            self.id = id
+            self.name = name
+            self.imageFile = imageFile
+            self.maskFile = nil
+            self.maskEnabled = true
+            self.opacity = opacity
+            self.blendMode = blendMode
+            self.transform = transform
+            self.adjustment = nil
+            self.text = nil
+            self.filename = imageFile
+            self.width = nil
+            self.height = nil
+        }
+
+        public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             id = try container.decode(UUID.self, forKey: .id)
             name = try container.decode(String.self, forKey: .name)
@@ -71,21 +87,25 @@ struct ProjectManifest: Sendable, Codable {
             height = try container.decodeIfPresent(Int.self, forKey: .height)
         }
 
-        func encode(to encoder: Encoder) throws {
+        public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(id, forKey: .id)
             try container.encode(name, forKey: .name)
             if let imageFile { try container.encode(imageFile, forKey: .imageFile) }
             if let maskFile { try container.encode(maskFile, forKey: .maskFile) }
             if !maskEnabled { try container.encode(maskEnabled, forKey: .maskEnabled) }
-            // Don't encode defaults
-            guard opacity != 1.0 || blendMode != .normal else { return }
-            if opacity != 1.0 { try container.encode(opacity, forKey: .opacity) }
-            if blendMode != .normal { try container.encode(blendMode, forKey: .blendMode) }
+            try container.encode(opacity, forKey: .opacity)
+            try container.encode(blendMode, forKey: .blendMode)
+            try container.encode(transform, forKey: .transform)
+            if let adjustment { try container.encode(adjustment, forKey: .adjustment) }
+            if let text { try container.encode(text, forKey: .text) }
+            if let filename { try container.encode(filename, forKey: .filename) }
+            if let width { try container.encode(width, forKey: .width) }
+            if let height { try container.encode(height, forKey: .height) }
         }
     }
 
-    enum BlendMode: String, Codable {
+    public enum BlendMode: String, Codable {
         case normal = "Normal", darken = "Darken"
         case multiply = "Multiply", colorBurn = "Color Burn", linearBurn = "Linear Burn"
         case screen = "Screen", colorDodge = "Color Dodge", linearDodgeAdd = "Linear Dodge (Add)"
@@ -96,35 +116,44 @@ struct ProjectManifest: Sendable, Codable {
         case hue = "Hue", saturation = "Saturation", color = "Color", luminosity = "Luminosity"
     }
 
-    struct Transform: Sendable, Codable {
-        let origin: [Double]              // [x, y] in document pixels
-        let size: [Double]                // [width, height]
-        let rotation: Double              // degrees, clockwise
-        let flipX: Bool, flipY: Bool
-        let sampling: String              // "High quality", "Smooth", or "Nearest"
+    public struct Transform: Sendable, Codable {
+        public let origin: [Double]       // [x, y] in document pixels
+        public let size: [Double]         // [width, height]
+        public let rotation: Double       // degrees, clockwise
+        public let flipX: Bool, flipY: Bool
+        public let sampling: String       // "High quality", "Smooth", or "Nearest"
+
+        public init(origin: [Double], size: [Double], rotation: Double, flipX: Bool, flipY: Bool, sampling: String) {
+            self.origin = origin
+            self.size = size
+            self.rotation = rotation
+            self.flipX = flipX
+            self.flipY = flipY
+            self.sampling = sampling
+        }
     }
 
-    enum AdjustmentKind: String, Codable {
+    public enum AdjustmentKind: String, Codable {
         case hueSaturation, levels, curves, exposure, gradientMap, grain
         case invert, blackWhite, colorBalance
         case gaussianBlur, motionBlur, addNoise
     }
 
-    struct Adjustment: Sendable, Codable {
-        let kind: AdjustmentKind
+    public struct Adjustment: Sendable, Codable {
+        public let kind: AdjustmentKind
         // Fields vary by kind — simplified for CLI purposes.
         // Full implementation would include all per-kind settings.
     }
 
-    struct TextMetadata: Sendable, Codable {
-        let content: String
-        let fontName: String              // PostScript name
-        let fontSize: Double              // in pixels
-        let red: Double, green: Double, blue: Double   // 0–1 color
-        let alignment: String             // "Left", "Center", "Right"
+    public struct TextMetadata: Sendable, Codable {
+        public let content: String
+        public let fontName: String       // PostScript name
+        public let fontSize: Double       // in pixels
+        public let red: Double, green: Double, blue: Double
+        public let alignment: String      // "Left", "Center", "Right"
     }
 
-    init(
+    public init(
         format: String = "com.compositor.project",
         version: Int = 11,
         colorSpace: String = "sRGB",
@@ -167,9 +196,9 @@ struct ProjectManifest: Sendable, Codable {
 }
 
 /// Read/write manifest files for .comp project folders.
-enum ManifestIO {
+public enum ManifestIO {
     /// Read a manifest from a .comp folder path. Throws on invalid JSON or format violations.
-    static func read(from packageURL: URL) throws -> ProjectManifest {
+    public static func read(from packageURL: URL) throws -> ProjectManifest {
         let manifestURL = packageURL.appendingPathComponent("manifest.json")
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             throw CoreError.fileNotFound(path: manifestURL.path)
@@ -193,7 +222,7 @@ enum ManifestIO {
     }
 
     /// Write a manifest to a .comp folder atomically (write to tmp, then rename).
-    static func write(to packageURL: URL, manifest: ProjectManifest) throws {
+    public static func write(to packageURL: URL, manifest: ProjectManifest) throws {
         let manifestURL = packageURL.appendingPathComponent("manifest.json")
         let tmpURL = packageURL.appendingPathComponent(".manifest.json.tmp")
 

@@ -1,0 +1,44 @@
+{
+    "description": "Add a layer to a .comp project, change its opacity, and flatten",
+    "steps": [
+        {
+            "command": "compositor project add",
+            "args": {
+                "--project": "./shot.comp",
+                "--image": "./plate.png",
+                "--name": "Plate",
+                "--opacity": "1",
+                "--blend": "Normal",
+                "--origin": "0,0"
+            },
+            "expected_status": "success"
+        },
+        {
+            "command": "compositor project set",
+            "args": {
+                "--project": "./shot.comp",
+                "--layer": "Plate",
+                "--opacity": "0.6",
+                "--blend": "Multiply"
+            },
+            "expected_status": "success",
+            "notes": "Flatten supports only Normal, Multiply, and Screen."
+        },
+        {
+            "command": "compositor project list",
+            "args": {
+                "--project": "./shot.comp"
+            },
+            "expected_status": "success",
+            "notes": "stdout is compact JSON: width, height, layer_count, layers[]."
+        },
+        {
+            "command": "compositor project flatten",
+            "args": {
+                "--project": "./shot.comp",
+                "--output": "./flat.png"
+            },
+            "expected_status": "success"
+        }
+    ]
+}

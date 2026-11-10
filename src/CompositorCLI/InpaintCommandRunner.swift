@@ -60,42 +60,52 @@ struct InpaintCommandRunner {
 
         var inpaintTimeMs = 0
         if algo == "lama" {
-            // Check if LaMa model is installed on disk
-            let modelDir = modelPath(for: .lamaFast)
-            guard FileManager.default.fileExists(atPath: modelDir.path),
-                  let files = try? FileManager.default.contentsOfDirectory(
-                      at: modelDir, includingPropertiesForKeys: nil),
-                  !files.isEmpty else {
-                return CommandResult.makeError(
-                    .modelMissing,
-                    detail: "LaMa model not installed. Run `compositor models download lama-fast` to install.",
-                    hint: "https://huggingface.co/AEmotionStudio/lama-inpainting",
-                    timing: nil
-                )
+            let allowed = ["fast", "balanced", "high"]
+            guard allowed.contains(laMaPreset) else {
+                return CommandResult.makeError(.renderFailed, detail: "Unknown LaMa preset '\(laMaPreset)'. Expected fast, balanced, or high.", timing: nil)
             }
-        }
+            let inpaintStart = DispatchTime.now()
+            do {
+                let rgb = try straightRGB(cgImage)
+                let maskBytes = try straightGray(maskCG)
+                let filled = try CoreMLInpaint.fill(rgb: rgb, mask: maskBytes, width: width, height: height, preset: laMaPreset)
+                var packed = [UInt8](repeating: 255, count: stride * height)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let s = (y * width + x) * 3
+                        let d = y * stride + x * 4
+                        packed[d] = filled[s]
+                        packed[d + 1] = filled[s + 1]
+                        packed[d + 2] = filled[s + 2]
+                    }
+                }
+                result = packed
+            } catch let error as CoreError {
+                let kind: CommandErrorType
+                switch error.cliErrorType {
+                case "modelMissing": kind = .modelMissing
+                default: kind = .inferenceFailed
+                }
+                return CommandResult.makeError(kind, detail: error.errorDescription ?? "LaMa failed", hint: error.cliHint, timing: nil)
+            } catch {
+                return CommandResult.makeError(.inferenceFailed, detail: error.localizedDescription, timing: nil)
+            }
+            inpaintTimeMs = dispatchTimeIntervalMs(inpaintStart, DispatchTime.now())
+            phases.append(.init(name: "inpainting", ms: inpaintTimeMs))
+        } else if algo != "patch-based" {
+            return CommandResult.makeError(.renderFailed, detail: "Unknown algorithm '\(algo)'. Expected patch-based or lama.", timing: nil)
+        } else {
 
-        if algo == "lama" {
-            // LaMa inference requires an MLX backend — implement in a future phase.
-            return CommandResult.makeError(
-                .renderFailed,
-                detail: "LaMa model is installed but Swift/MLX inference is not yet implemented.",
-                hint: "Use `--algorithm patch-based` for now.",
-                timing: nil
-            )
+            let inpaintStart = DispatchTime.now()
+            do {
+                result = try runPatchInpaint(cgImage, mask: maskCG, width: width, height: height, stride: stride)
+            } catch {
+                let detail = (error as? LocalizedError)?.errorDescription ?? "Patch inpaint failed"
+                return CommandResult.makeError(.renderFailed, detail: detail, timing: nil)
+            }
+            inpaintTimeMs = dispatchTimeIntervalMs(inpaintStart, DispatchTime.now())
+            phases.append(.init(name: "inpainting", ms: inpaintTimeMs))
         }
-
-        // Patch-based inpainting (default) — only reached when algo != "lama"
-        let inpaintStart = DispatchTime.now()
-        do {
-            result = try runPatchInpaint(cgImage, mask: maskCG, width: width, height: height, stride: stride)
-        } catch {
-            let detail = (error as? LocalizedError)?.errorDescription ?? "Patch inpaint failed"
-            return CommandResult.makeError(.renderFailed, detail: detail, timing: nil)
-        }
-        let inpaintEnd = DispatchTime.now()
-        inpaintTimeMs = dispatchTimeIntervalMs(inpaintStart, inpaintEnd)
-        phases.append(.init(name: "inpainting", ms: inpaintTimeMs))
 
         let writePhase = DispatchTime.now()
         phases.append(.init(name: "write_output", ms: dispatchTimeIntervalMs(writePhase, writePhase)))

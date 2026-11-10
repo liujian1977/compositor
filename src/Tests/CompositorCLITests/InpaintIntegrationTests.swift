@@ -129,7 +129,7 @@ final class InpaintIntegrationTests: XCTestCase {
         XCTAssertEqual(result.status, "error")
         XCTAssertNotNil(result.error)
         // Should be renderFailed (inference not implemented), NOT modelMissing
-        XCTAssertTrue(["renderFailed", "modelMissing"].contains(result.error!.type))
+        XCTAssertTrue(["inferenceFailed", "renderFailed", "modelMissing"].contains(result.error!.type))
 
         try? FileManager.default.removeItem(at: imageURL)
         try? FileManager.default.removeItem(at: maskURL)
