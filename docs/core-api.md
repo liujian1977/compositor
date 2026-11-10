@@ -245,6 +245,30 @@ enum SobelOp {
 
 ---
 
+### 3.5 MaskOps（cutout / 蒙版算术 / inspect）
+
+字节逻辑在 `MaskOps.c`，不依赖 CoreGraphics，Linux 上用 ASan/UBSan 测试像素和 JSON。
+
+```c
+/* 颜色复制，alpha 换成蒙版字节。失败时不写 out_rgba。 */
+int cutout_apply_mask(const uint8_t *rgb, const uint8_t *mask,
+                      int width, int height, uint8_t *out_rgba);
+
+int mask_invert(const uint8_t *src, int width, int height, uint8_t *dst);          /* 255 - v */
+int mask_union(const uint8_t *a, const uint8_t *b, int width, int height, uint8_t *dst);      /* max */
+int mask_intersect(const uint8_t *a, const uint8_t *b, int width, int height, uint8_t *dst);  /* min */
+int mask_subtract(const uint8_t *a, const uint8_t *b, int width, int height, uint8_t *dst);   /* 饱和 a - b */
+
+/* 成功时写出紧凑 JSON（无换行）。schema 见 command-spec.md 的 inspect。 */
+int mask_inspect_format_json(const uint8_t *mask, int width, int height, char **out_json);
+```
+
+前景阈值 128，连通性 8。`coverage` 是 `sum(mask) / (255 * width * height)`，软值按比例计入。
+
+Swift：`MaskOps.applyCutout`、`invert`、`union`、`intersect`、`subtract`、`inspectJSON`。
+
+---
+
 ## 4. CoreIO API — 文件 I/O 签名
 
 ### 4.1 ImageExporter（新增 — 从桌面应用提取的写入函数）
@@ -264,6 +288,11 @@ extension ImageExporter {
 extension ImageExporter {
     /// @param resolution 每英寸像素（默认 72）
     static func writePDF(_ image: CGImage, to url: URL, resolution: Double = 72) throws
+}
+
+/// straight RGBA8（R,G,B,A）写成 PNG。`cutout` 用它落盘。
+extension ImageExporter {
+    static func writeStraightRGBAPNG(_ rgba: [UInt8], width: Int, height: Int, to url: URL) throws
 }
 ```
 

@@ -12,6 +12,16 @@
                 "--output": "./subject_mask.png"
             },
             "expected_status": "success"
+        },
+        {
+            "command": "compositor cutout",
+            "args": {
+                "--image": "./photo.jpg",
+                "--mask": "./subject_mask.png",
+                "--output": "./subject.png"
+            },
+            "expected_status": "success",
+            "notes": "Apply the mask as straight RGBA alpha. `compositor apply-mask` is the same command."
         }
     ]
 }

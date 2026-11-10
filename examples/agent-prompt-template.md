@@ -39,6 +39,7 @@ compositor extract --input <image.png> \
 ```bash
 # User: "Can you cut out this person?"
 compositor extract --input photo.jpg --output person_mask.png --format json
+compositor cutout --image photo.jpg --mask person_mask.png --output person.png --format json
 
 # User: "I need a really clean cutout, the hair is tricky"
 compositor extract --input portrait.jpg \
@@ -169,7 +170,40 @@ compositor selection-modify --input hard_mask.png \
 compositor selection-modify --input loose_mask.png \
     --operation contract --amount 5 --unit pixels \
     --output tight_mask.png --format json
+
+# User: "Flip this mask" / "keep everything except the face"
+compositor selection-modify --input bg_mask.png \
+    --operation invert --output object_mask.png --format json
+compositor selection-modify --input person_mask.png \
+    --with face_mask.png --operation subtract \
+    --output person_without_face.png --format json
 ```
+
+**Operation: invert / union / intersect / subtract**
+
+```bash
+compositor selection-modify --input <mask.png> --operation invert --output <out.png>
+compositor selection-modify --input <a.png> --with <b.png> \
+    --operation union|intersect|subtract --output <out.png>
+```
+
+Byte formulas: invert `255-v`, union `max`, intersect `min`, subtract saturating `a-b` (`--input` minus `--with`). On 0/255 masks these are the set operations. `--with` is required for union, intersect, and subtract.
+
+#### 3b. `compositor cutout` — Transparent PNG (`apply-mask` is the same command)
+
+```bash
+compositor cutout --image <photo.png> --mask <mask.png> --output <cutout.png>
+```
+
+RGB is copied. Alpha is the mask byte, not a product with the source alpha and not thresholded at 128. The file is a straight RGBA PNG.
+
+#### 3c. `compositor inspect` — Mask JSON on stdout
+
+```bash
+compositor inspect --input <mask.png> [--channel luminance|alpha] [--output report.json]
+```
+
+Success stdout is one compact JSON object and nothing else (a single trailing newline). Fields: `width`, `height`, `coverage` (mean of mask/255), `foreground_threshold` (128), `connectivity` (8), `bounding_box` (or null), `component_count`, `components[]` with `index`, `area`, and `center` `{x,y}`. Centers are the mean of integer pixel coordinates, origin top-left, y downward. Do not look for a `status` wrapper on success.
 
 #### 4. `compositor export` — Image Export
 
@@ -246,10 +280,12 @@ On error:
 When the user gives you a natural language request:
 
 1. **Identify the operation type:**
-   - "cut out", "remove background", "isolate" → `extract`
+   - "cut out", "remove background", "isolate", "transparent PNG" → `extract`, then `cutout`
    - "remove X", "delete Y", "clean up" → `inpaint` (need mask first)
    - "select X color/region" → `selection-modify --operation wand`
    - "soften the edge", "make it tighter" → `selection-modify --operation feather/contract`
+   - "invert / add / subtract masks" → `selection-modify --operation invert|union|intersect|subtract`
+   - "how much of the mask is selected", "where is the selection" → `inspect`
 
 2. **Assess complexity:**
    - Simple subject on plain background? Use default (`vision`, no refinement).
@@ -276,7 +312,8 @@ When the user gives you a natural language request:
 # Step 1: Extract subject or select object via wand/extract
 compositor extract --input scene.jpg --output bg_mask.png --format json
 
-# Step 2: Invert mask to get the object (or user provides object mask)
+# Step 2: Invert the mask when extract selected the background instead of the object
+compositor selection-modify --input bg_mask.png --operation invert --output object_mask.png --format json
 # Step 3: Inpaint the hole
 compositor inpaint --image scene.jpg \
     --mask object_mask.png \
@@ -296,7 +333,11 @@ compositor extract --input portrait.jpg \
     --edge-shift -2 \
     --output person_mask.png --format json
 
-# Use the mask to composite onto new background (outside this tool)
+compositor cutout --image portrait.jpg \
+    --mask person_mask.png \
+    --output person.png --format json
+
+compositor inspect --input person.png --channel alpha
 ```
 
 ---

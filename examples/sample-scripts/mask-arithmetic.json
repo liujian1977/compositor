@@ -1,0 +1,26 @@
+{
+    "description": "Invert a background mask, then subtract a protected region",
+    "steps": [
+        {
+            "command": "compositor selection-modify",
+            "args": {
+                "--input": "./bg_mask.png",
+                "--operation": "invert",
+                "--output": "./object_mask.png"
+            },
+            "expected_status": "success",
+            "notes": "255 - v at every byte. --with is ignored for invert."
+        },
+        {
+            "command": "compositor selection-modify",
+            "args": {
+                "--input": "./object_mask.png",
+                "--with": "./keep_region.png",
+                "--operation": "subtract",
+                "--output": "./object_without_keep.png"
+            },
+            "expected_status": "success",
+            "notes": "Saturating subtraction: input minus --with. union is max, intersect is min."
+        }
+    ]
+}

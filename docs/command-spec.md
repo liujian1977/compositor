@@ -11,7 +11,7 @@ compositor <command> [options] [--output <path>] [--format json] [--version] [--
 | `--format` | `text\|json` | `text` | 输出格式。`json` 返回结构化结果供 agent 解析（包含计时数据） |
 | `--verbose` | 标志 | off | 将进度打印到 stderr（不影响 stdout）。不改变 stdout 内容。 |
 
-> **注意**：`--output <path>` 仅由产生输出的命令使用（`extract`、`inpaint`、`selection-modify`、`export`）。`models` 命令不使用它。
+> **注意**：`--output <path>` 由产生文件的命令使用（`extract`、`cutout` / `apply-mask`、`inpaint`、`selection-modify`、`export`）。`inspect` 把 JSON 报告打到 stdout，`--output` 可选，用来再写一份相同的文档。`models` 命令不使用 `--output`。
 
 ---
 
@@ -69,6 +69,116 @@ compositor extract --input photo.png \
     --contrast-threshold 0.8 \
     --edge-shift -1 \
     --output mask.png --format json
+```
+
+---
+
+### 命令：cutout ✅（别名 `apply-mask`）
+
+把一张蒙版应用到图像上，写出 **straight RGBA PNG**：颜色来自原图，alpha 来自蒙版。`extract` 只产出蒙版；透明抠图用本命令。
+
+```bash
+compositor cutout \
+    --image <photo.png> \
+    --mask <mask.png> \
+    --output <cutout.png>
+
+# 同一命令
+compositor apply-mask --image photo.png --mask mask.png --output cutout.png
+```
+
+#### 参数
+
+| 参数 | 类型 | 必填 | 默认值 | 描述 |
+|------|------|------|--------|------|
+| `--image` | URL 路径 | 是 | — | 源图像（JPEG、PNG）。按 device RGB 读取颜色 |
+| `--mask` | URL 路径 | 是 | — | 与图像同尺寸的灰度蒙版。`255` = 不透明，`0` = 全透明，中间值原样成为 alpha |
+| `--output` | URL 路径 | 是 | — | 输出 PNG |
+
+#### 像素契约
+
+- 输出每个像素：`R,G,B` 复制源图颜色，`A` **等于**蒙版字节（不是与源 alpha 相乘，也不做 128 阈值）。
+- 颜色不预乘。PNG 以 straight alpha（`CGImageAlphaInfo.last`，内存顺序 R,G,B,A）写入。
+- 蒙版尺寸必须与图像一致，否则 `dimensionMismatch`。
+- 字节级实现是 `MaskOps.c` 的 `cutout_apply_mask`。Linux 上的 ASan/UBSan 测试锁的是这块缓冲区；CoreGraphics 写 PNG 只在 macOS 上发生。
+
+#### 输出
+
+与 `extract` 相同。text 模式打印 `Cutout written to <path>`。`--format json` 时 stdout 只有 `CommandResult` JSON。
+
+#### 使用示例
+
+```bash
+compositor extract --input portrait.jpg --output person_mask.png
+compositor cutout --image portrait.jpg --mask person_mask.png --output person.png
+```
+
+---
+
+### 命令：inspect ✅
+
+读取一张蒙版（或图像的一个通道），向 **stdout 打印一份紧凑 JSON**。成功时不包 `status` / `timing`，也不打印日志。进度只走 stderr（`--verbose`）。
+
+```bash
+compositor inspect \
+    --input <mask.png> \
+    [--channel luminance|alpha] \
+    [--output <report.json>]
+```
+
+`--format` 可以传，成功时被忽略：stdout 始终是下面这份文档，再加一个换行。失败时 stdout 改为与其他命令相同的错误 JSON（`status` = `error`），不会再混进检查文档。当前实现里子命令失败也退出 0（错误在 JSON 里），`inspect` 同样如此。
+
+#### 参数
+
+| 参数 | 类型 | 必填 | 默认值 | 描述 |
+|------|------|------|--------|------|
+| `--input` | URL 路径 | 是 | — | 蒙版或图像 |
+| `--channel` | 枚举 | 否 | `luminance` | `luminance`：按灰度读取（与 `selection-modify` 相同，灰度 PNG 的蒙版值）。`alpha`：读取 alpha 字节，用于检查 `cutout` 的结果 |
+| `--output` | URL 路径 | 否 | — | 把同一份 JSON 再写到文件（文件末尾有一个换行）。stdout 仍然打印这份 JSON |
+
+#### 成功 stdout 的 schema
+
+线上是单个紧凑 JSON 对象：键顺序固定，无多余空白、对象内部无换行（`print` 会再补一个换行）。下面为了阅读把同一结构展开了：
+
+```json
+{
+  "width": 4,
+  "height": 2,
+  "coverage": 0.312745,
+  "foreground_threshold": 128,
+  "connectivity": 8,
+  "bounding_box": { "x": 1, "y": 0, "width": 2, "height": 2 },
+  "component_count": 1,
+  "components": [
+    { "index": 0, "area": 3, "center": { "x": 1.666667, "y": 0.333333 } }
+  ]
+}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `width` / `height` | 蒙版尺寸，像素 |
+| `coverage` | `sum(mask[i]) / (255 * width * height)`，范围 `[0, 1]`。软蒙版按比例计入。**不受**前景阈值影响 |
+| `foreground_threshold` | 常量 `128`。`mask[i] >= 128` 才算前景 |
+| `connectivity` | 常量 `8`。连通域是 8 邻域（与 expand/contract 相同）。对角相接算同一块 |
+| `bounding_box` | 所有前景像素的紧外接矩形。`x`/`y` 是左上角（原点在左上，y 向下，0-based）。`width`/`height` 是包含两端的像素数。没有前景时为 `null` |
+| `component_count` | 前景连通域个数 |
+| `components` | 按扫描顺序（行优先，先遇到的种子在前）。`index` 从 0 起。`area` 是像素个数。`center` 是这些像素整数坐标的平均值（一个像素 `(x, y)` 的中心就是 `(x, y)`，不是像素中心 `+0.5`） |
+| 数字格式 | 最多 6 位小数，四舍五入（非负，远离 0），去掉末尾 0。整数不带小数点，例如 `0.5`、`1`、`1.666667` |
+
+没有前景时：
+
+```json
+{"width":2,"height":2,"coverage":0,"foreground_threshold":128,"connectivity":8,"bounding_box":null,"component_count":0,"components":[]}
+```
+
+`127` 计入 `coverage`，但不进入外接框和连通域。`128` 是前景。
+
+#### 使用示例
+
+```bash
+compositor inspect --input person_mask.png
+compositor inspect --input person.png --channel alpha --output person_report.json
 ```
 
 ---
@@ -203,12 +313,41 @@ compositor selection-modify \
 - 完全确定性的，无 ML 组件
 - `--point` 为图像像素坐标（0-based）
 
+##### 5. invert / union / intersect / subtract（蒙版算术）
+
+```bash
+# 补集。--with 可省略，传了也会被忽略
+compositor selection-modify \
+    --input <mask.png> \
+    --operation invert \
+    --output <result.png>
+
+# 第二张蒙版必须与 --input 同尺寸。subtract 是 input 减去 with
+compositor selection-modify \
+    --input <a.png> \
+    --with <b.png> \
+    --operation union|intersect|subtract \
+    --output <result.png>
+```
+
+逐字节运算（软蒙版和 0/255 二值蒙版用同一公式）：
+
+| 操作 | 公式 | 0/255 蒙版上的含义 |
+|------|------|-------------------|
+| `invert` | `255 - v` | 补集 |
+| `union` | `max(a, b)` | 并集 |
+| `intersect` | `min(a, b)` | 交集 |
+| `subtract` | `a >= b ? a - b : 0` | 差集（A 去掉 B）。不是 `a * (1 - b)` |
+
+`--amount` 对这四项无效。缺 `--with`（union / intersect / subtract）时报错。尺寸不一致为 `dimensionMismatch`。
+
 #### 参数（所有操作的公共参数）
 
 | 参数 | 类型 | 必填 | 描述 |
 |------|------|------|------|
-| `--input` | URL 路径 | 是 | expand/contract/feather/edge-snap 的源**掩码**。wand 操作的源**图像**。 |
-| `--operation` | 枚举 | 是 | 其中之一：expand、contract、feather、edge-snap、wand |
+| `--input` | URL 路径 | 是 | expand/contract/feather/edge-snap 以及 invert/union/intersect/subtract 的源**掩码**。wand 操作的源**图像**。 |
+| `--operation` | 枚举 | 是 | 其中之一：expand、contract、feather、edge-snap、wand、invert、union、intersect、subtract |
+| `--with` | URL 路径 | 条件性 | union / intersect / subtract 的第二张蒙版。subtract 的方向是 `--input` 减去 `--with` |
 | `--amount` / `--point` / 等 |  varies | 是 | 操作特定参数（见各子节） |
 | `--guide` | URL 路径 | 条件性 | edge-snap 时，当输入不是具有可用亮度的图像时为必需 |
 
@@ -233,6 +372,15 @@ compositor selection-modify --input hard_mask.png \
 compositor selection-modify --input landscape.jpg \
     --operation wand --point 400,120 --tolerance 64 \
     --contiguous true --output sky_sel.png
+
+# 反相，得到物体而不是背景
+compositor selection-modify --input bg_mask.png \
+    --operation invert --output object_mask.png
+
+# 从主体蒙版里挖掉一块
+compositor selection-modify --input person_mask.png \
+    --with face_mask.png --operation subtract \
+    --output person_without_face.png
 ```
 
 ---
@@ -390,6 +538,8 @@ compositor pipeline \
 | `face-swap` | `compositor face-swap` | `--source`（来自 reference）、`--target`（来自 source 通过 detect-faces） | 否 — 就地修改或写入新文件 |
 | `inpaint` | `compositor inpaint` | `--image`（源图像）、`--mask`（来自 extract） | 是 — inpainted.png |
 | `composite` | `compositor composite` | `--foreground`、`--background`、`--mask` | 否 — 写入最终结果 |
+| `cutout` / `apply-mask` | `compositor cutout` | `image`、`mask`（逗号步骤里 mask 默认 `${extract.mask}`） | 是 — cutout.png（输出键 `image`） |
+| `inspect` | `compositor inspect` | `input`。`parameters.channel` 可选，默认 `luminance` | 是 — inspect.json（输出键 `report`） |
 
 #### 管线 JSON 输出
 
@@ -418,7 +568,7 @@ compositor pipeline \
 - 如果某步失败，后续步骤被跳过；管线状态 = `"error"`
 - 中间文件存储在 `$TMPDIR/compositor-pipeline-{UUID}/`，成功后清理
 - 成功时最终中间结果会拷贝到 `--output` 指定的路径；`--pipeline-config` 接受 JSON 数组形式的步骤定义（可含每步 `parameters`）
-- **状态**：已实现。`PipelineRunner.swift`（CLI 目标内），支持 extract / detect-faces / detect-poses / face-swap / inpaint / composite / selection-modify。
+- **状态**：已实现。`PipelineRunner.swift`（CLI 目标内），支持 extract / cutout / inspect / detect-faces / detect-poses / face-swap / inpaint / composite / selection-modify。`selection-modify` 的第二张蒙版用输入键 `with`。
 
 ---
 
@@ -428,7 +578,7 @@ compositor pipeline \
 
 ```json
 {
-    "command": "extract|inpaint|selection-modify|export|models|pipeline",
+    "command": "extract|cutout|inspect|inpaint|selection-modify|export|models|pipeline",
     "version": "0.1.0",
     "status": "success|error",
     "output": "/absolute/path/to/output.png",   // status == success 时存在，error 时为 null
@@ -455,8 +605,10 @@ compositor pipeline \
 | 命令 | `timing.phases[].name` 中的可能相位名 |
 |------|---------------------------------------|
 | `extract` | `read_input`、`segmentation`、`refinement`、`write_output` |
+| `cutout` | `read_input`、`cutout`、`write_output` |
+| `inspect` | 成功时 stdout **不是**这张计时表，而是上面的检查文档。内部相位为 `read_input`、`inspect`、可选的 `write_output` |
 | `inpaint` | `read_input`、`inpainting`、`write_output` |
-| `selection-modify` | `read_input`、`selection`、`write_output`（或 edge-snap 的 `sobel_compute` + `snap`） |
+| `selection-modify` | `read_input`、`selection`、`write_output`（或 edge-snap 的 `sobel_compute` + `snap`）。算术操作的相位名也是 `selection` |
 | `export` | `read_input`、`render`、`write_output` |
 | `models list/download/remove` | `read_manifest`、`download`、`verify_hash`、`complete` |
 | `pipeline` | `orchestrate`，加上每步自己的相位（见各步骤） |

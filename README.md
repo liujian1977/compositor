@@ -11,8 +11,12 @@
 ## 快速开始（面向 Agent）
 
 ```bash
-# 提取主体掩码
+# 提取主体掩码，再写成透明 PNG
 compositor extract --input photo.jpg --output mask.png
+compositor cutout --image photo.jpg --mask mask.png --output subject.png
+
+# 查看蒙版覆盖率、外接框和连通域（stdout 是 JSON）
+compositor inspect --input mask.png
 
 # 移除物体
 compositor inpaint --image scene.jpg --mask obj_mask.png --algorithm lama --output cleaned.png

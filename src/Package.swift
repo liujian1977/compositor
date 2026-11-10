@@ -22,9 +22,10 @@ let package = Package(
                 "WandOp.c",
                 "BlurOp.c",
                 "PatchInpaintOp.c",
-                "CompositeOp.c"
+                "CompositeOp.c",
+                "MaskOps.c"
             ],
-            publicHeadersPath: "."  // exposes CompositeOp.h, MorphologyOp.h, SobelOp.h, WandOp.h, BlurOp.h, PatchInpaintOp.h
+            publicHeadersPath: "."  // exposes CompositeOp.h, MorphologyOp.h, SobelOp.h, WandOp.h, BlurOp.h, PatchInpaintOp.h, MaskOps.h
         ),
 
         // Main library — pure Swift, depends on CoreC (links the C code).
@@ -41,7 +42,8 @@ let package = Package(
                 "CoreRendering/WandOp.c",
                 "CoreRendering/BlurOp.c",
                 "CoreRendering/PatchInpaintOp.c",
-                "CoreRendering/CompositeOp.c"
+                "CoreRendering/CompositeOp.c",
+                "CoreRendering/MaskOps.c"
             ],
             sources: [
                 "CoreDocument/CanvasSize.swift",
@@ -57,7 +59,8 @@ let package = Package(
                 "CoreRendering/WandOp.swift",
                 "CoreRendering/BlurOp.swift",
                 "CoreRendering/PatchInpaintOp.swift",
-                "CoreRendering/CompositeOp.swift"
+                "CoreRendering/CompositeOp.swift",
+                "CoreRendering/MaskOps.swift"
             ],
             linkerSettings: [
                 .linkedLibrary("c")  // for memset in C functions

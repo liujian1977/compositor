@@ -1,0 +1,14 @@
+{
+    "description": "Report mask coverage, bounds, and connected components as JSON on stdout",
+    "steps": [
+        {
+            "command": "compositor inspect",
+            "args": {
+                "--input": "./subject_mask.png",
+                "--channel": "luminance"
+            },
+            "expected_status": "success",
+            "notes": "Success stdout is one compact JSON object (width, height, coverage, bounding_box, component_count, components[].center) plus a trailing newline. It is not wrapped in status/timing. Use --channel alpha to measure a cutout PNG."
+        }
+    ]
+}

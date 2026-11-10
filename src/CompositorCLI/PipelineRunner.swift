@@ -204,6 +204,10 @@ final class PipelineRunner {
             switch stepName.lowercased() {
             case "extract":
                 return try runExtractStep(inputs)
+            case "cutout", "apply-mask":
+                return try runCutoutStep(stepName, inputs)
+            case "inspect":
+                return try runInspectStep(stepName, stepConfig, inputs)
             case "detect-faces", "face-detect":
                 return try runFaceDetectStep(inputs)
             case "detect-poses", "pose-estimate", "pose":
@@ -278,6 +282,40 @@ final class PipelineRunner {
         )
         let result = try runner.execute()
         return stepFromResult("extract", result, outputs: ["mask": outputPath.path])
+    }
+
+    private func runCutoutStep(_ name: String, _ inputs: [String: URL]) throws -> PipelineStep {
+        guard let image = inputs["image"] else {
+            throw PipelineError.missingRequiredInput("cutout requires 'image'")
+        }
+        guard let mask = inputs["mask"] else {
+            throw PipelineError.missingRequiredInput("cutout requires 'mask'")
+        }
+        let outputPath = tempDirectory.appendingPathComponent("cutout.png")
+        let runner = CutoutCommandRunner(
+            image: image,
+            mask: mask,
+            output: outputPath,
+            format: .json
+        )
+        let result = try runner.execute()
+        return stepFromResult(name, result, outputs: ["image": outputPath.path])
+    }
+
+    private func runInspectStep(_ name: String, _ stepConfig: PipelineStepConfig, _ inputs: [String: URL]) throws -> PipelineStep {
+        guard let input = inputs["input"] else {
+            throw PipelineError.missingRequiredInput("inspect requires 'input'")
+        }
+        let outputPath = tempDirectory.appendingPathComponent("inspect.json")
+        let channel = stepConfig.parameters?["channel"] ?? "luminance"
+        let runner = InspectCommandRunner(
+            input: input,
+            channel: channel,
+            output: outputPath,
+            format: .json
+        )
+        let outcome = try runner.execute()
+        return stepFromResult(name, outcome.result, outputs: ["report": outputPath.path])
     }
 
     private func runFaceDetectStep(_ inputs: [String: URL]) throws -> PipelineStep {
@@ -392,6 +430,7 @@ final class PipelineRunner {
             sampleSize: "point",
             contiguous: true,
             guide: nil,
+            withMask: inputs["with"],
             sobelThreshold: 0.2,
             snapRadius: 3,
             output: outputPath,

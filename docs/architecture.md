@@ -11,7 +11,7 @@ Compositor CLI 是一个确定性的图像处理命令行接口，专为 LLM age
 | 组件 | 状态 |
 |------|------|
 | 分层架构 | ✅ 已实现 |
-| 命令层（extract/inpaint/selection-modify/export/models） | ✅ 已实现 |
+| 命令层（extract/cutout/inspect/inpaint/selection-modify/export/models） | ✅ 已实现 |
 | 引擎层（Vision/SAM2 分割、基于 patch 的修复） | ✅ 已实现 |
 | 核心层（C 像素操作、文档/IO 模块） | ✅ 已实现 |
 | 模型下载引擎（ModelScope + HuggingFace） | ✅ 已实现 |
@@ -35,7 +35,7 @@ Compositor CLI 是一个确定性的图像处理命令行接口，专为 LLM age
 │  ┌──────────────────────────────────────────────┐   │
 │  │             命令层 ✅ v0.1.0                  │   │
 │  │                                              │   │
-│  │  extract │ inpaint │ selection-modify │ export│   │
+│  │  extract │ cutout │ inspect │ inpaint │ selection-modify │ export│   │
 │  │  models (list/download/remove)               │   │
 │  └──────────────┬───────────────────────────────┘   │
 │                 │                                    │

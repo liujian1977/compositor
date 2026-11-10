@@ -22,6 +22,8 @@ struct CompositorCLI: ParsableCommand {
         abstract: "Deterministic image compositing CLI for AI agents.",
         subcommands: [
             ExtractCommand.self,
+            CutoutCommand.self,
+            InspectCommand.self,
             InpaintCommand.self,
             SelectionModifyCommand.self,
             ExportCommand.self,
@@ -96,6 +98,73 @@ extension CompositorCLI {
         }
     }
 
+    struct CutoutCommand: ParsableCommand {
+        static var configuration = CommandConfiguration(
+            commandName: "cutout",
+            abstract: "Apply a mask as alpha and write a straight RGBA PNG.",
+            aliases: ["apply-mask"]
+        )
+
+        @Option(help: "Source image path")
+        var image: String = ""
+
+        @Option(help: "Mask path. White keeps the pixel, black clears alpha, gray is partial alpha.")
+        var mask: String = ""
+
+        @Option(help: "Output RGBA PNG path")
+        var output: String = ""
+
+        @Option(help: "Output format (text|json)")
+        var format: OutputFormat = .text
+
+        func run() throws {
+            let cmd = CutoutCommandRunner(
+                image: URL(fileURLWithPath: image),
+                mask: URL(fileURLWithPath: mask),
+                output: URL(fileURLWithPath: output),
+                format: format
+            )
+            let result = try cmd.execute()
+            if case .json = format {
+                print(String(data: result.toJSON(), encoding: .utf8)!)
+            }
+        }
+    }
+
+    struct InspectCommand: ParsableCommand {
+        static var configuration = CommandConfiguration(
+            commandName: "inspect",
+            abstract: "Print a JSON report of mask size, coverage, bounds, and components."
+        )
+
+        @Option(help: "Mask or image path")
+        var input: String = ""
+
+        @Option(help: "Channel to measure (luminance|alpha). Default: luminance")
+        var channel: String = "luminance"
+
+        @Option(help: "Also write the JSON document to this path")
+        var output: String?
+
+        @Option(help: "Accepted for compatibility. Success stdout is always the inspection document.")
+        var format: OutputFormat = .text
+
+        func run() throws {
+            let cmd = InspectCommandRunner(
+                input: URL(fileURLWithPath: input),
+                channel: channel,
+                output: output.map { URL(fileURLWithPath: $0) },
+                format: format
+            )
+            let outcome = try cmd.execute()
+            if outcome.result.status == "success", let document = outcome.document {
+                print(document)
+                return
+            }
+            print(String(data: outcome.result.toJSON(), encoding: .utf8)!)
+        }
+    }
+
     struct InpaintCommand: ParsableCommand {
         static var configuration: CommandConfiguration {
             CommandConfiguration(commandName: "inpaint")
@@ -143,7 +212,7 @@ extension CompositorCLI {
         @Option(help: "Input image or mask path (required for expand/contract/feather/edge-snap; source image for wand)")
         var input: String = ""
 
-        @Option(help: "Operation type (expand|contract|feather|wand|edge-snap)")
+        @Option(help: "Operation type (expand|contract|feather|wand|edge-snap|invert|union|intersect|subtract)")
         var operation: String = ""
 
         @Option(help: "Amount in pixels or percent. Default: 10")
@@ -169,6 +238,9 @@ extension CompositorCLI {
         @Option(help: "Guide image for edge detection (required for edge-snap)")
         var guide: String?
 
+        @Option(name: .customLong("with"), help: "Second mask for union, intersect, and subtract. Ignored by invert.")
+        var withMask: String?
+
         @Option(help: "Sobel threshold [0, 1] for edge snapping. Default: 0.5")
         var sobelThreshold: Float = 0.5
 
@@ -192,6 +264,7 @@ extension CompositorCLI {
                 sampleSize: sampleSize,
                 contiguous: contiguous,
                 guide: guide.map { URL(fileURLWithPath: $0) },
+                withMask: withMask.map { URL(fileURLWithPath: $0) },
                 sobelThreshold: sobelThreshold,
                 snapRadius: snapRadius,
                 output: output.map { URL(fileURLWithPath: $0) },
@@ -427,6 +500,11 @@ extension CompositorCLI {
 
                     switch stepName.lowercased() {
                     case "extract":
+                        inputs["input"] = "--input"
+                    case "cutout", "apply-mask":
+                        inputs["image"] = "--input"
+                        inputs["mask"] = "${extract.mask}"
+                    case "inspect":
                         inputs["input"] = "--input"
                     case "detect-faces", "face-detect":
                         inputs["input"] = "--input"

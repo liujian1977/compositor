@@ -1,8 +1,9 @@
 // SelectionModifyCommandRunner.swift — selection-modify command execution logic.
 //
-// Implements all five sub-operations from command-spec.md:
+// Implements selection-modify from command-spec.md:
 //   expand / contract (binary morphology), feather (Gaussian blur),
-//   edge-snap (Sobel-guided boundary relocation), wand (color flood-fill).
+//   edge-snap (Sobel-guided boundary relocation), wand (color flood-fill),
+//   invert / union / intersect / subtract (per-byte mask arithmetic).
 
 import Foundation
 import CoreGraphics
@@ -11,7 +12,7 @@ import CompositorCore
 
 struct SelectionModifyCommandRunner {
     let input: URL
-    let operation: String        // expand|contract|feather|wand|edge-snap
+    let operation: String        // expand|contract|feather|wand|edge-snap|invert|union|intersect|subtract
     let amount: Double
     let unit: String             // pixels|percent
     let point: String?           // x,y (for wand)
@@ -19,6 +20,7 @@ struct SelectionModifyCommandRunner {
     let sampleSize: String       // point|3x3|5x5 (for wand)
     let contiguous: Bool         // for wand
     let guide: URL?              // for edge-snap
+    let withMask: URL?           // second mask for union / intersect / subtract
     let sobelThreshold: Float    // 0-1 (for edge-snap)
     let snapRadius: Int          // pixels (for edge-snap)
     let output: URL?             // required for expand/contract/feather/edge-snap; optional for wand
@@ -53,9 +55,11 @@ struct SelectionModifyCommandRunner {
             result = edgeSnap(cgImage, readPhase: readPhase, phases: &phases)
         case "wand":
             result = wand(cgImage, readPhase: readPhase, phases: &phases)
+        case "invert", "union", "intersect", "subtract":
+            result = arithmetic(cgImage, kind: operation, readPhase: readPhase, phases: &phases)
         default:
             result = CommandResult.makeError(.renderFailed,
-                detail: "Unknown operation '\(operation)'. Expected one of: expand, contract, feather, wand, edge-snap",
+                detail: "Unknown operation '\(operation)'. Expected one of: expand, contract, feather, wand, edge-snap, invert, union, intersect, subtract",
                 timing: timingEntry(phaseStart, readPhase, [], phases))
         }
 
@@ -234,6 +238,71 @@ struct SelectionModifyCommandRunner {
         }
 
         return writeMask(mask, width: rgba.width, height: rgba.height, processPhase: processPhase, phases: &phases)
+    }
+
+    // MARK: - invert / union / intersect / subtract
+
+    private func arithmetic(_ cgImage: CGImage, kind: String, readPhase: DispatchTime, phases: inout [CommandResult.TimingEntry.PhaseEntry]) -> CommandResult {
+        let width = cgImage.width, height = cgImage.height
+        let mask: SoftMask
+        do { mask = try SoftMask.fromCGImage(cgImage) }
+        catch { return CommandResult.makeError(.renderFailed, detail: "Cannot read mask: \(error)", timing: partialTiming(readPhase, phases)) }
+        let a = byteMask(mask)
+
+        let out: [UInt8]
+        do {
+            switch kind {
+            case "invert":
+                out = try MaskOps.invert(a, width: width, height: height)
+            case "union", "intersect", "subtract":
+                guard let otherURL = withMask else {
+                    return CommandResult.makeError(
+                        .renderFailed,
+                        detail: "--with <mask> is required for operation '\(kind)'",
+                        timing: partialTiming(readPhase, phases)
+                    )
+                }
+                guard FileManager.default.fileExists(atPath: otherURL.path) else {
+                    return CommandResult.makeError(.fileNotFound, detail: "Second mask not found: \(otherURL.path)", timing: partialTiming(readPhase, phases))
+                }
+                guard let otherData = try? Data(contentsOf: otherURL),
+                      let otherSource = CGImageSourceCreateWithData(otherData as CFData, nil),
+                      let otherImage = CGImageSourceCreateImageAtIndex(otherSource, 0, nil) else {
+                    return CommandResult.makeError(.invalidImageFormat, detail: "Cannot decode mask at \(otherURL.path)", timing: partialTiming(readPhase, phases))
+                }
+                guard otherImage.width == width, otherImage.height == height else {
+                    return CommandResult.makeError(
+                        .dimensionMismatch,
+                        detail: "Mask \(otherImage.width)×\(otherImage.height) must match input \(width)×\(height)",
+                        timing: partialTiming(readPhase, phases)
+                    )
+                }
+                let other = try SoftMask.fromCGImage(otherImage)
+                let b = byteMask(other)
+                switch kind {
+                case "union":
+                    out = try MaskOps.union(a, b, width: width, height: height)
+                case "intersect":
+                    out = try MaskOps.intersect(a, b, width: width, height: height)
+                default:
+                    out = try MaskOps.subtract(a, b, width: width, height: height)
+                }
+            default:
+                return CommandResult.makeError(.renderFailed, detail: "Unknown arithmetic operation '\(kind)'", timing: partialTiming(readPhase, phases))
+            }
+        } catch {
+            return CommandResult.makeError(.renderFailed, detail: "Mask arithmetic failed: \(error.localizedDescription)", timing: partialTiming(readPhase, phases))
+        }
+
+        let processPhase = DispatchTime.now()
+        phases.append(.init(name: "selection", ms: dispatchTimeIntervalMs(readPhase, processPhase)))
+        return writeMask(out, width: width, height: height, processPhase: processPhase, phases: &phases)
+    }
+
+    private func byteMask(_ mask: SoftMask) -> [UInt8] {
+        mask.pixels.map { sample in
+            UInt8(round(min(1.0, max(0.0, sample)) * 255))
+        }
     }
 
     // MARK: - Output helpers

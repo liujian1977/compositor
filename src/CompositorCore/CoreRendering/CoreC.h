@@ -9,5 +9,6 @@
 #include "BlurOp.h"
 #include "PatchInpaintOp.h"
 #include "CompositeOp.h"
+#include "MaskOps.h"
 
 #endif /* CoreC_h */
